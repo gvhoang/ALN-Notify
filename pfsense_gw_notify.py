@@ -44,8 +44,8 @@ from pathlib import Path
 
 CONFIG = {
     # Telegram Bot credentials
-    "telegram_token":   "YOUR_BOT_TOKEN",     # e.g. 8506670215:AAHOR-zBY...
-    "telegram_chat_id": "YOUR_CHAT_ID",        # e.g. 1015285796
+    "telegram_token":   "8506670215:AAHOR-zBY-4TbaSTCLztxumUH2y5PdfcDlg",     # e.g. 8506670215:AAHOR-zBY...
+    "telegram_chat_id": "1015285796",        # e.g. 1015285796
 
     # pfSense log file path (FreeBSD)
     "log_file": "/var/log/system.log",
@@ -169,7 +169,7 @@ def format_message(gateway, status, monitor_ip="", gateway_ip="",
                    rtt_avg="", rtt_stddev="", loss_pct=0.0,
                    substatus="", group="", action=""):
     """Build a beautiful Telegram HTML notification string."""
-    now = datetime.now().strftime("%H:%M:%S")
+    now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     isp = detect_isp(gateway)
 
     # ── Header ──
