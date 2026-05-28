@@ -167,7 +167,7 @@ def send_telegram(token, chat_id, text):
 
 def format_message(gateway, status, monitor_ip="", gateway_ip="",
                    rtt_avg="", rtt_stddev="", loss_pct=0.0,
-                   substatus="", group="", action=""):
+                   substatus="", group="", action="", pfsense=""):
     """Build a beautiful Telegram HTML notification string."""
     now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     isp = detect_isp(gateway)
@@ -181,6 +181,11 @@ def format_message(gateway, status, monitor_ip="", gateway_ip="",
         header = "⚠️ <b>CẢNH BÁO GATEWAY</b>"
 
     lines = [header, ""]
+
+    # ── Server identity ──
+    if pfsense:
+        lines.append("🖥️ Máy chủ: <code>%s</code>" % pfsense)
+        lines.append("")
 
     # ── WAN identity ──
     lines.append("🌐 WAN: <code>%s</code>" % gateway)
@@ -322,6 +327,10 @@ def parse_line(line):
     Parse one syslog line. Returns a dict with event fields, or None.
     dict type values: 'action' | 'stats' | 'dyndns' | 'system'
     """
+    # Extract hostname from syslog prefix for all event types
+    host_m = RE_SYSLOG_HOST.match(line)
+    pfsense = host_m.group(1) if host_m else ""
+
     # ── Gateway action: available/unavailable ──
     m = RE_ACTION.search(line)
     if m:
@@ -331,6 +340,7 @@ def parse_line(line):
             "status":  "online" if m.group(2).lower() == "available" else "offline",
             "action":  m.group(3),
             "group":   m.group(4),
+            "pfsense": pfsense,
         }
 
     # ── Gateway action: has packet loss, omitting (pfSense highloss format) ──
@@ -342,9 +352,10 @@ def parse_line(line):
             "status":  "offline",
             "action":  "omitting from",
             "group":   m.group(2),
+            "pfsense": pfsense,
         }
 
-    # ── Stats line (down = offline) ──
+    # ── Stats line (down = offline) — syslog prefix may be absent ──
     m = RE_STATS.search(line)
     if m:
         raw_status = m.group(7).lower()
@@ -358,42 +369,38 @@ def parse_line(line):
             "loss_pct":    float(m.group(6)),
             "status":      "offline" if raw_status == "down" else raw_status,
             "substatus":   m.group(8).strip(),
+            "pfsense":     pfsense,
         }
 
     # ── Older dpinger format ──
     m = RE_DOWN_SIMPLE.search(line)
     if m:
         return {"type": "action", "gateway": m.group(1), "status": "offline",
-                "action": "removing from", "group": ""}
+                "action": "removing from", "group": "", "pfsense": pfsense}
 
     m = RE_UP_SIMPLE.search(line)
     if m:
         return {"type": "action", "gateway": m.group(1), "status": "online",
-                "action": "adding to", "group": ""}
+                "action": "adding to", "group": "", "pfsense": pfsense}
 
     # ── DynDNS IP update ──
     m = RE_DYNDNS.search(line)
     if m:
-        host_m = RE_SYSLOG_HOST.match(line)
         return {
             "type":      "dyndns",
             "hostname":  m.group(1),
             "isp":       m.group(2),
             "iface":     m.group(3),
             "new_ip":    m.group(4),
-            "pfsense":   host_m.group(1) if host_m else "",
+            "pfsense":   pfsense,
         }
 
     # ── System events ──
     if RE_BOOTUP.search(line):
-        host_m = RE_SYSLOG_HOST.match(line)
-        return {"type": "system", "event": "bootup",
-                "pfsense": host_m.group(1) if host_m else ""}
+        return {"type": "system", "event": "bootup", "pfsense": pfsense}
 
     if RE_SHUTDOWN.search(line):
-        host_m = RE_SYSLOG_HOST.match(line)
-        return {"type": "system", "event": "shutdown",
-                "pfsense": host_m.group(1) if host_m else ""}
+        return {"type": "system", "event": "shutdown", "pfsense": pfsense}
 
     return None
 
@@ -468,6 +475,7 @@ def process_event(event, state, cfg):
         substatus  = event.get("substatus", ""),
         group      = event.get("group", ""),
         action     = event.get("action", ""),
+        pfsense    = event.get("pfsense", ""),
     )
 
     ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg)
@@ -491,8 +499,7 @@ def watch_log(cfg):
     state    = load_state(cfg["state_file"])
     buf      = PendingBuffer(cfg["delay_seconds"])
 
-    # Anti-spam state for DynDNS (key = hostname+isp, value = last_sent timestamp)
-    dyndns_sent = {}
+    # Anti-spam state (không dùng cho DynDNS — mỗi cập nhật IP đều gửi)
 
     _log("👀 Đang theo dõi: %s" % log_path)
     _log("📡 Telegram chat: %s" % cfg["telegram_chat_id"])
@@ -543,24 +550,18 @@ def watch_log(cfg):
                     buf.add(event)
 
                 elif etype == "dyndns":
-                    # Anti-spam: 60s cooldown per hostname+isp
-                    key = "%s|%s" % (event["hostname"], event["isp"])
-                    if time.time() - dyndns_sent.get(key, 0) >= 60:
-                        msg = format_dyndns_message(
-                            hostname = event["hostname"],
-                            isp      = event["isp"],
-                            iface    = event["iface"],
-                            new_ip   = event["new_ip"],
-                            pfsense  = event.get("pfsense", ""),
-                        )
-                        ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg)
-                        if ok:
-                            dyndns_sent[key] = time.time()
-                            _log("[DynDNS] ✅ %s → %s" % (event["hostname"], event["new_ip"]))
-                        else:
-                            _log("[DynDNS] ❌ gửi thất bại")
+                    msg = format_dyndns_message(
+                        hostname = event["hostname"],
+                        isp      = event["isp"],
+                        iface    = event["iface"],
+                        new_ip   = event["new_ip"],
+                        pfsense  = event.get("pfsense", ""),
+                    )
+                    ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg)
+                    if ok:
+                        _log("[DynDNS] ✅ %s → %s" % (event["hostname"], event["new_ip"]))
                     else:
-                        _log("[DynDNS] ⏭️  spam: %s" % event["hostname"])
+                        _log("[DynDNS] ❌ gửi thất bại")
 
                 elif etype == "system":
                     msg = format_system_message(event["event"], event.get("pfsense", ""))
