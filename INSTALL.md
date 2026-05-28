@@ -98,7 +98,8 @@ nohup python3.11 /root/pfsense_gw_notify.py watch >& /var/log/pf_notify.log & ec
 
 **Kiểm tra đang chạy:**
 ```tcsh
-ps aux | grep pfsense_gw_notify cat /var/run/pf_notify.pid
+ps aux | grep pfsense_gw_notify | grep -v grep
+cat /var/run/pf_notify.pid
 ```
 
 **Xem log realtime:**
