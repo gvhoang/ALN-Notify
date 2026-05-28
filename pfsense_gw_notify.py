@@ -54,8 +54,6 @@ CONFIG = {
         "/var/log/gateways.log",    # Gateway ONLINE/OFFLINE (dpinger) — ưu tiên 1
         "/var/log/system.log",      # Bootup, shutdown, DynDNS
         "/var/log/ppp.log",         # PPPoE WAN kết nối/ngắt kết nối
-        "/var/log/ipsec.log",       # IPsec VPN tunnel up/down
-        "/var/log/openvpn.log",     # OpenVPN tunnel up/down
         "/var/log/auth.log",        # SSH brute force, đăng nhập trái phép
     ],
 
@@ -316,57 +314,6 @@ def format_ppp_message(event, interface="", remote_ip="", reason="", pfsense="")
     return "\n".join(lines)
 
 
-def format_ipsec_message(event, tunnel="", peer_ip="", pfsense=""):
-    """Format IPsec VPN tunnel event notification."""
-    now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-    if event == "up":
-        header = "🟢 <b>IPSEC VPN KẾT NỐI</b>"
-        detail = "✅ Tunnel đã thiết lập thành công"
-    elif event == "down":
-        header = "🔴 <b>IPSEC VPN NGẮT KẾT NỐI</b>"
-        detail = "⚠️ IKE_SA đã bị xóa / ngắt kết nối"
-    elif event == "connecting":
-        header = "🟡 <b>IPSEC VPN ĐANG KẾT NỐI</b>"
-        detail = "⏳ Đang thiết lập tunnel IPsec..."
-    else:
-        return None
-    lines = [header, ""]
-    if pfsense:
-        lines.append("🖥️ Máy chủ: <code>%s</code>" % pfsense)
-        lines.append("")
-    if tunnel:
-        lines.append("🔐 Tunnel: <code>%s</code>" % tunnel)
-    if peer_ip:
-        lines.append("📡 Peer IP: <code>%s</code>" % peer_ip)
-    lines.append(detail)
-    lines.append("")
-    lines.append("⏰ %s" % now)
-    return "\n".join(lines)
-
-
-def format_openvpn_message(event, peer="", port="", reason="", pfsense=""):
-    """Format OpenVPN connection event notification."""
-    now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-    if event in ("connect", "connected"):
-        header = "🟢 <b>OPENVPN KẾT NỐI</b>"
-        detail = "✅ OpenVPN tunnel đã kết nối thành công"
-    elif event == "error":
-        header = "🔴 <b>OPENVPN LỖI KẾT NỐI</b>"
-        detail = "⚠️ Lỗi: <code>%s</code>" % reason
-    else:
-        return None
-    lines = [header, ""]
-    if pfsense:
-        lines.append("🖥️ Máy chủ: <code>%s</code>" % pfsense)
-        lines.append("")
-    if peer:
-        lines.append("📡 Peer: <code>%s:%s</code>" % (peer, port) if port else "<code>%s</code>" % peer)
-    lines.append(detail)
-    lines.append("")
-    lines.append("⏰ %s" % now)
-    return "\n".join(lines)
-
-
 def format_auth_message(event, user="", src_ip="", count=1, pfsense=""):
     """Format authentication / security event notification."""
     now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
@@ -463,38 +410,6 @@ RE_PPP_AUTH_FAIL  = re.compile(
     r"Authentication failed)",
     re.IGNORECASE
 )
-
-# ── IPsec / strongSwan (charon) events ───────────────────────────────────────
-# IKE_SA established: "charon[...]: xx[IKE] IKE_SA tunnel_name[N] established between A...B"
-RE_IPSEC_UP   = re.compile(
-    r"charon\[\d+\].*IKE_SA\s+(\S+)\[(\d+)\]\s+established between\s+([\d.]+)",
-    re.IGNORECASE
-)
-# IKE_SA deleting/destroyed: "charon[...]: xx[IKE] deleting IKE_SA tunnel_name[N]"
-RE_IPSEC_DOWN = re.compile(
-    r"charon\[\d+\].*(deleting|destroying|closing)\s+IKE_SA\s+(\S+)\[(\d+)\]",
-    re.IGNORECASE
-)
-# IKE_SA state change CONNECTING
-RE_IPSEC_CONNECTING = re.compile(
-    r"charon\[\d+\].*IKE_SA\s+(\S+)\[(\d+)\]\s+state change:\s+\w+\s+=>\s+CONNECTING",
-    re.IGNORECASE
-)
-
-# ── OpenVPN events ────────────────────────────────────────────────────────────
-# Connected to peer
-RE_OVPN_CONNECT    = re.compile(
-    r"openvpn\[\d+\].*Peer Connection Initiated with\s+\[AF_INET[6]?\]([\d.:]+):(\d+)",
-    re.IGNORECASE
-)
-# TLS or connection error
-RE_OVPN_ERROR      = re.compile(
-    r"openvpn\[\d+\].*(TLS Error|TLS handshake failed|Connection reset|"
-    r"SIGUSR1|process exiting|AUTH_FAILED)",
-    re.IGNORECASE
-)
-# OpenVPN CONNECTED SUCCESS line
-RE_OVPN_CONNECTED  = re.compile(r"openvpn\[\d+\].*CONNECTED SUCCESS", re.IGNORECASE)
 
 # ── Auth / Security events ────────────────────────────────────────────────────
 # SSH login failed
@@ -620,36 +535,6 @@ def parse_line(line):
         return {"type": "ppp", "event": "auth_fail",
                 "reason": m.group(1), "pfsense": pfsense}
 
-    # ── IPsec ────────────────────────────────────────────────────────────────
-    m = RE_IPSEC_UP.search(line)
-    if m:
-        return {"type": "ipsec", "event": "up",
-                "tunnel": m.group(1), "peer_ip": m.group(3), "pfsense": pfsense}
-
-    m = RE_IPSEC_DOWN.search(line)
-    if m:
-        return {"type": "ipsec", "event": "down",
-                "tunnel": m.group(2), "pfsense": pfsense}
-
-    m = RE_IPSEC_CONNECTING.search(line)
-    if m:
-        return {"type": "ipsec", "event": "connecting",
-                "tunnel": m.group(1), "pfsense": pfsense}
-
-    # ── OpenVPN ──────────────────────────────────────────────────────────────
-    m = RE_OVPN_CONNECT.search(line)
-    if m:
-        return {"type": "openvpn", "event": "connect",
-                "peer": m.group(1), "port": m.group(2), "pfsense": pfsense}
-
-    if RE_OVPN_CONNECTED.search(line):
-        return {"type": "openvpn", "event": "connected", "pfsense": pfsense}
-
-    m = RE_OVPN_ERROR.search(line)
-    if m:
-        return {"type": "openvpn", "event": "error",
-                "reason": m.group(1), "pfsense": pfsense}
-
     # ── Auth / Security ──────────────────────────────────────────────────────
     m = RE_AUTH_FAIL_SSH.search(line)
     if m:
@@ -768,8 +653,6 @@ _WATCH_KEYS = (
     "DynDNS updated", "Bootup complete", "pfSense will shutdown",
     "pppd[", "Connect:", "Connection terminated", "LCP terminated",
     "PAP authentication failed", "CHAP authentication failed",
-    "IKE_SA", "established between", "deleting IKE_SA",
-    "openvpn[", "TLS Error", "CONNECTED", "Connection reset",
     "Failed password", "Invalid user ", "Accepted password",
     "Accepted publickey", "authentication error",
 )
@@ -886,32 +769,6 @@ def watch_log(cfg):
                     if msg:
                         ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg)
                         _log("[PPP] %s gửi %s" % ("✅" if ok else "❌", ev))
-
-                # ── IPsec ────────────────────────────────────────────────────
-                elif etype == "ipsec":
-                    ev = event["event"]
-                    # Skip "connecting" noise unless tunnel is down
-                    if ev == "connecting":
-                        continue
-                    _log("[IPsec] %s — tunnel: %s" % (ev, event.get("tunnel", "")))
-                    msg = format_ipsec_message(
-                        event=ev, tunnel=event.get("tunnel", ""),
-                        peer_ip=event.get("peer_ip", ""), pfsense=ps)
-                    if msg:
-                        ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg)
-                        _log("[IPsec] %s gửi %s" % ("✅" if ok else "❌", ev))
-
-                # ── OpenVPN ──────────────────────────────────────────────────
-                elif etype == "openvpn":
-                    ev = event["event"]
-                    _log("[OpenVPN] %s" % ev)
-                    msg = format_openvpn_message(
-                        event=ev, peer=event.get("peer", ""),
-                        port=event.get("port", ""), reason=event.get("reason", ""),
-                        pfsense=ps)
-                    if msg:
-                        ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg)
-                        _log("[OpenVPN] %s gửi %s" % ("✅" if ok else "❌", ev))
 
                 # ── Auth / Security ──────────────────────────────────────────
                 elif etype == "auth":
