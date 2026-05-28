@@ -378,9 +378,9 @@ RE_STATS = re.compile(
 RE_DOWN_SIMPLE = re.compile(r"MONITOR:\s+(\S+)\s+is\s+down", re.IGNORECASE)
 RE_UP_SIMPLE   = re.compile(r"MONITOR:\s+(\S+)\s+is\s+up",   re.IGNORECASE)
 
-# "phpDynDNS (homehoag4): (Success) homehoag4 updated to 27.70.239.85"
+# "phpDynDNS: updating cache file /conf/dyndns_wan...'homehoag4.vnc.id.vn'6.cache: 27.70.239.85"
 RE_DYNDNS = re.compile(
-    r"phpDynDNS\s+\(([^)]+)\):\s+\(Success\)\s+\S+\s+updated to\s+([\d.]+)",
+    r"phpDynDNS: updating cache file[^']*'([^']+)'\d+\.cache:\s*([\d.]+)",
     re.IGNORECASE
 )
 
@@ -978,7 +978,7 @@ def main():
 
     # ── test mode ──
     elif args.mode == "test":
-        hostname = socket.gethostname()
+        hostname = socket.getfqdn()
         token    = cfg["telegram_token"]
         chat_id  = cfg["telegram_chat_id"]
 
