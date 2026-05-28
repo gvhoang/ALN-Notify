@@ -61,7 +61,7 @@ CONFIG = {
     "state_file": "/tmp/pf_gw_states.json",
 
     # Delay (seconds) before sending alert — absorbs brief flapping
-    "delay_seconds": 5,
+    "delay_seconds": 3,
 
     # How long (seconds) to suppress duplicate same-status notifications
     "spam_cooldown": 300,
@@ -139,12 +139,12 @@ def should_send(state, gateway, new_status, cooldown):
 
 
 def _err(msg):
-    print("[ERR] %s" % msg, file=sys.stderr)
+    print("[ERR] %s" % msg, file=sys.stderr, flush=True)
 
 
 def _log(msg):
     ts = datetime.now().strftime("%H:%M:%S")
-    print("[%s] %s" % (ts, msg))
+    print("[%s] %s" % (ts, msg), flush=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -245,18 +245,18 @@ def format_message(gateway, status, monitor_ip="", gateway_ip="",
     return "\n".join(lines)
 
 
-def format_dyndns_message(hostname, isp, iface, new_ip, pfsense=""):
+def format_dyndns_message(hostname, new_ip, pfsense=""):
     """Format a DynDNS IP update notification."""
     now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     lines = [
         "🔄 <b>CẬP NHẬT IP ĐỘNG</b>",
         "",
-        "🖥️ Host: <code>%s</code>" % hostname,
-        "🌐 Kết nối: <code>%s</code>  <i>(%s)</i>" % (isp, iface),
-        "📍 IP mới: <code>%s</code>" % new_ip,
     ]
     if pfsense:
-        lines.append("🔧 pfSense: <code>%s</code>" % pfsense)
+        lines.append("🖥️ Máy chủ: <code>%s</code>" % pfsense)
+        lines.append("")
+    lines.append("🌐 Hostname: <code>%s</code>" % hostname)
+    lines.append("📍 IP mới: <code>%s</code>" % new_ip)
     lines.append("")
     lines.append("⏰ %s" % now)
     return "\n".join(lines)
@@ -378,9 +378,9 @@ RE_STATS = re.compile(
 RE_DOWN_SIMPLE = re.compile(r"MONITOR:\s+(\S+)\s+is\s+down", re.IGNORECASE)
 RE_UP_SIMPLE   = re.compile(r"MONITOR:\s+(\S+)\s+is\s+up",   re.IGNORECASE)
 
-# "DynDNS updated IP Address for HOST on ISP (interface) to IP"
+# "phpDynDNS (homehoag4): (Success) homehoag4 updated to 27.70.239.85"
 RE_DYNDNS = re.compile(
-    r"DynDNS updated IP Address for (\S+)\s+on\s+(\S+)\s+\(([^)]+)\)\s+to\s+([\d.]+)",
+    r"phpDynDNS\s+\(([^)]+)\):\s+\(Success\)\s+\S+\s+updated to\s+([\d.]+)",
     re.IGNORECASE
 )
 
@@ -499,9 +499,7 @@ def parse_line(line):
         return {
             "type":      "dyndns",
             "hostname":  m.group(1),
-            "isp":       m.group(2),
-            "iface":     m.group(3),
-            "new_ip":    m.group(4),
+            "new_ip":    m.group(2),
             "pfsense":   pfsense,
         }
 
@@ -648,7 +646,7 @@ def process_event(event, state, cfg):
 # Keywords covering ALL event types across all log files
 _WATCH_KEYS = (
     "MONITOR:", "|online|", "|offline|", "|down|",
-    "DynDNS updated", "Bootup complete", "pfSense will shutdown",
+    "DynDNS updated", "phpDynDNS", "Bootup complete", "pfSense will shutdown",
     "pppd[", "Connect:", "Connection terminated", "LCP terminated",
     "PAP authentication failed", "CHAP authentication failed",
     "Failed password", "Invalid user ", "Accepted password",
@@ -737,8 +735,8 @@ def watch_log(cfg):
                 # ── DynDNS ───────────────────────────────────────────────────
                 elif etype == "dyndns":
                     msg = format_dyndns_message(
-                        hostname=event["hostname"], isp=event["isp"],
-                        iface=event["iface"], new_ip=event["new_ip"], pfsense=ps)
+                        hostname=event["hostname"],
+                        new_ip=event["new_ip"], pfsense=ps)
                     ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg)
                     _log("[DynDNS] %s %s → %s" % ("✅" if ok else "❌",
                                                     event["hostname"], event["new_ip"]))
@@ -862,8 +860,8 @@ def _format_event_to_msg(event, pfsense=""):
         )
     if etype == "dyndns":
         return format_dyndns_message(
-            hostname=event.get("hostname", ""), isp=event.get("isp", ""),
-            iface=event.get("iface", ""), new_ip=event.get("new_ip", ""),
+            hostname=event.get("hostname", ""),
+            new_ip=event.get("new_ip", ""),
             pfsense=pfsense)
     if etype == "system":
         return format_system_message(event.get("event", ""), pfsense)
