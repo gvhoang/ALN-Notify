@@ -103,6 +103,24 @@ SUBSTATUS_LABELS = {
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def get_pfsense_fqdn():
+    """Return FQDN of this pfSense box (hostname.domain).
+    Reads /cf/conf/config.xml first (most reliable), falls back to socket."""
+    try:
+        import xml.etree.ElementTree as ET
+        tree = ET.parse("/cf/conf/config.xml")
+        root = tree.getroot()
+        h = root.findtext("system/hostname", "").strip()
+        d = root.findtext("system/domain", "").strip()
+        if h and d:
+            return "%s.%s" % (h, d)
+        if h:
+            return h
+    except Exception:
+        pass
+    return socket.getfqdn()
+
+
 def detect_isp(name):
     """Return ISP info dict for a gateway name, or a default."""
     upper = name.upper()
@@ -699,10 +717,12 @@ def watch_log(cfg):
     state     = load_state(cfg["state_file"])
     buf       = PendingBuffer(cfg["delay_seconds"])
     ev_queue  = queue.Queue()
+    local_fqdn = get_pfsense_fqdn()
 
     # Brute-force tracker: src_ip -> list of timestamps
     brute_tracker = {}
 
+    _log("🖥️  Máy chủ: %s" % local_fqdn)
     _log("📡 Telegram chat: %s" % cfg["telegram_chat_id"])
     _log("⏳ Trì hoãn cảnh báo: %ds | 🔕 Chặn spam gateway: %ds" % (
         cfg["delay_seconds"], cfg["spam_cooldown"]))
@@ -978,7 +998,7 @@ def main():
 
     # ── test mode ──
     elif args.mode == "test":
-        hostname = socket.getfqdn()
+        hostname = get_pfsense_fqdn()
         token    = cfg["telegram_token"]
         chat_id  = cfg["telegram_chat_id"]
 
