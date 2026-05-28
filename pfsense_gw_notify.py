@@ -643,7 +643,7 @@ def process_event(event, state, cfg):
         substatus  = event.get("substatus", ""),
         group      = event.get("group", ""),
         action     = event.get("action", ""),
-        pfsense    = event.get("pfsense", ""),
+        pfsense    = cfg.get("_fqdn") or event.get("pfsense", ""),
     )
 
     ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg)
@@ -718,6 +718,7 @@ def watch_log(cfg):
     buf       = PendingBuffer(cfg["delay_seconds"])
     ev_queue  = queue.Queue()
     local_fqdn = get_pfsense_fqdn()
+    cfg["_fqdn"] = local_fqdn
 
     # Brute-force tracker: src_ip -> list of timestamps
     brute_tracker = {}
@@ -745,7 +746,8 @@ def watch_log(cfg):
                     break
 
                 etype = event.get("type")
-                ps    = event.get("pfsense", "")
+                # Always use local FQDN (syslog prefix only has short name)
+                ps = local_fqdn
 
                 # ── Gateway events → pending buffer ──────────────────────────
                 if etype in ("action", "stats"):
