@@ -37,7 +37,6 @@ import urllib.request
 import urllib.parse
 import urllib.error
 from datetime import datetime
-from pathlib import Path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -181,7 +180,6 @@ def format_message(gateway, status, monitor_ip="", gateway_ip="",
                    substatus="", group="", action="", pfsense=""):
     """Build a beautiful Telegram HTML notification string."""
     now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-    isp = detect_isp(gateway)
 
     # ── Header ──
     if status == "offline":
@@ -249,7 +247,6 @@ def format_message(gateway, status, monitor_ip="", gateway_ip="",
 def format_dyndns_message(hostname, isp, iface, new_ip, pfsense=""):
     """Format a DynDNS IP update notification."""
     now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-    isp_info = detect_isp(isp)
     lines = [
         "🔄 <b>CẬP NHẬT IP ĐỘNG</b>",
         "",
@@ -437,7 +434,7 @@ RE_AUTH_FAIL_GUI    = re.compile(
 def parse_line(line):
     """
     Parse one syslog line. Returns a dict with event fields, or None.
-    dict type values: 'action' | 'stats' | 'dyndns' | 'system'
+    Event types: 'action' | 'stats' | 'dyndns' | 'system' | 'ppp' | 'auth'
     """
     # Extract hostname from syslog prefix for all event types
     host_m = RE_SYSLOG_HOST.match(line)
