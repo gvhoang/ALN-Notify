@@ -31,6 +31,8 @@ import time
 import sys
 import os
 import argparse
+import threading
+import queue
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -44,11 +46,18 @@ from pathlib import Path
 
 CONFIG = {
     # Telegram Bot credentials
-    "telegram_token":   "8506670215:AAHOR-zBY-4TbaSTCLztxumUH2y5PdfcDlg",     # e.g. 8506670215:AAHOR-zBY...
-    "telegram_chat_id": "1015285796",        # e.g. 1015285796
+    "telegram_token":   "8506670215:AAHOR-zBY-4TbaSTCLztxumUH2y5PdfcDlg",
+    "telegram_chat_id": "1015285796",
 
-    # pfSense log file path (FreeBSD)
-    "log_file": "/var/log/system.log",
+    # Log files to watch — pfSense separates events into dedicated files
+    "log_files": [
+        "/var/log/gateways.log",    # Gateway ONLINE/OFFLINE (dpinger) — ưu tiên 1
+        "/var/log/system.log",      # Bootup, shutdown, DynDNS
+        "/var/log/ppp.log",         # PPPoE WAN kết nối/ngắt kết nối
+        "/var/log/ipsec.log",       # IPsec VPN tunnel up/down
+        "/var/log/openvpn.log",     # OpenVPN tunnel up/down
+        "/var/log/auth.log",        # SSH brute force, đăng nhập trái phép
+    ],
 
     # State file to persist gateway statuses across restarts
     "state_file": "/tmp/pf_gw_states.json",
@@ -62,6 +71,10 @@ CONFIG = {
     # Packet loss % thresholds
     "high_loss_threshold":     20,   # ⚠️  warn even if "online"
     "critical_loss_threshold": 80,   # 🔴  treat as offline
+
+    # Auth: group brute force alerts within this window (seconds)
+    "auth_brute_window": 60,
+    "auth_brute_threshold": 5,       # alerts per window before escalating
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -274,6 +287,118 @@ def format_system_message(event, pfsense=""):
     return "\n".join(lines)
 
 
+def format_ppp_message(event, interface="", remote_ip="", reason="", pfsense=""):
+    """Format PPP/PPPoE WAN connection event notification."""
+    now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    if event == "connect":
+        header = "🟢 <b>WAN PPPoE KẾT NỐI</b>"
+        detail = "✅ Đường truyền PPPoE đã kết nối thành công"
+    elif event == "remote_ip":
+        header = "🟢 <b>WAN PPPoE CÓ IP</b>"
+        detail = "📍 IP WAN đã được cấp: <code>%s</code>" % remote_ip
+    elif event == "disconnect":
+        header = "🔴 <b>WAN PPPoE MẤT KẾT NỐI</b>"
+        detail = "⚠️ Nguyên nhân: <code>%s</code>" % reason
+    elif event == "auth_fail":
+        header = "🔴 <b>WAN PPPoE XÁC THỰC THẤT BẠI</b>"
+        detail = "🔑 %s — Kiểm tra lại user/password ISP!" % reason
+    else:
+        return None
+    lines = [header, ""]
+    if pfsense:
+        lines.append("🖥️ Máy chủ: <code>%s</code>" % pfsense)
+        lines.append("")
+    if interface:
+        lines.append("🔌 Interface: <code>%s</code>" % interface)
+    lines.append(detail)
+    lines.append("")
+    lines.append("⏰ %s" % now)
+    return "\n".join(lines)
+
+
+def format_ipsec_message(event, tunnel="", peer_ip="", pfsense=""):
+    """Format IPsec VPN tunnel event notification."""
+    now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    if event == "up":
+        header = "🟢 <b>IPSEC VPN KẾT NỐI</b>"
+        detail = "✅ Tunnel đã thiết lập thành công"
+    elif event == "down":
+        header = "🔴 <b>IPSEC VPN NGẮT KẾT NỐI</b>"
+        detail = "⚠️ IKE_SA đã bị xóa / ngắt kết nối"
+    elif event == "connecting":
+        header = "🟡 <b>IPSEC VPN ĐANG KẾT NỐI</b>"
+        detail = "⏳ Đang thiết lập tunnel IPsec..."
+    else:
+        return None
+    lines = [header, ""]
+    if pfsense:
+        lines.append("🖥️ Máy chủ: <code>%s</code>" % pfsense)
+        lines.append("")
+    if tunnel:
+        lines.append("🔐 Tunnel: <code>%s</code>" % tunnel)
+    if peer_ip:
+        lines.append("📡 Peer IP: <code>%s</code>" % peer_ip)
+    lines.append(detail)
+    lines.append("")
+    lines.append("⏰ %s" % now)
+    return "\n".join(lines)
+
+
+def format_openvpn_message(event, peer="", port="", reason="", pfsense=""):
+    """Format OpenVPN connection event notification."""
+    now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    if event in ("connect", "connected"):
+        header = "🟢 <b>OPENVPN KẾT NỐI</b>"
+        detail = "✅ OpenVPN tunnel đã kết nối thành công"
+    elif event == "error":
+        header = "🔴 <b>OPENVPN LỖI KẾT NỐI</b>"
+        detail = "⚠️ Lỗi: <code>%s</code>" % reason
+    else:
+        return None
+    lines = [header, ""]
+    if pfsense:
+        lines.append("🖥️ Máy chủ: <code>%s</code>" % pfsense)
+        lines.append("")
+    if peer:
+        lines.append("📡 Peer: <code>%s:%s</code>" % (peer, port) if port else "<code>%s</code>" % peer)
+    lines.append(detail)
+    lines.append("")
+    lines.append("⏰ %s" % now)
+    return "\n".join(lines)
+
+
+def format_auth_message(event, user="", src_ip="", count=1, pfsense=""):
+    """Format authentication / security event notification."""
+    now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    if event in ("fail", "invalid"):
+        if count >= 5:
+            header = "🚨 <b>TẤN CÔNG BRUTE FORCE SSH</b>"
+            detail = "🔴 Phát hiện <b>%d lần</b> đăng nhập thất bại!" % count
+        else:
+            header = "⚠️ <b>ĐĂNG NHẬP SSH THẤT BẠI</b>"
+            detail = "❌ Đăng nhập không thành công"
+    elif event == "fail_gui":
+        header = "⚠️ <b>ĐĂNG NHẬP GIAO DIỆN WEB THẤT BẠI</b>"
+        detail = "❌ Sai mật khẩu đăng nhập pfSense GUI"
+    elif event == "ok":
+        header = "🔑 <b>ĐĂNG NHẬP SSH THÀNH CÔNG</b>"
+        detail = "✅ Phiên SSH đã được chấp nhận"
+    else:
+        return None
+    lines = [header, ""]
+    if pfsense:
+        lines.append("🖥️ Máy chủ: <code>%s</code>" % pfsense)
+        lines.append("")
+    if user:
+        lines.append("👤 Tài khoản: <code>%s</code>" % user)
+    if src_ip:
+        lines.append("🌍 Nguồn IP: <code>%s</code>" % src_ip)
+    lines.append(detail)
+    lines.append("")
+    lines.append("⏰ %s" % now)
+    return "\n".join(lines)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Log parser
 # ─────────────────────────────────────────────────────────────────────────────
@@ -320,6 +445,78 @@ RE_SHUTDOWN = re.compile(r"pfSense will shutdown", re.IGNORECASE)
 
 # Extract hostname from syslog line prefix (e.g. "May 28 12:49:02 homehoag dpinger: ...")
 RE_SYSLOG_HOST = re.compile(r"^\w{3}\s+\d+\s+[\d:]+\s+(\S+)\s+")
+
+# ── PPP / PPPoE WAN events ────────────────────────────────────────────────────
+# pppd connect: "pppd[1234]: Connect: ppp0 <--> /dev/..."
+RE_PPP_CONNECT    = re.compile(r"pppd\[\d+\][^:]*:\s+Connect:\s+(\S+)\s+<-->", re.IGNORECASE)
+# pppd assigned IP: "pppd[1234]: remote IP address X.X.X.X"
+RE_PPP_REMOTE_IP  = re.compile(r"pppd\[\d+\][^:]*:\s+remote IP address\s+([\d.]+)", re.IGNORECASE)
+# pppd disconnect variants
+RE_PPP_DISCONNECT = re.compile(
+    r"pppd\[\d+\][^:]*:\s+(Connection terminated|LCP terminated|"
+    r"Hangup \(SIGHUP\)|SIGTERM received|Modem hangup)",
+    re.IGNORECASE
+)
+# pppd auth failure
+RE_PPP_AUTH_FAIL  = re.compile(
+    r"pppd\[\d+\][^:]*:\s+(PAP authentication failed|CHAP authentication failed|"
+    r"Authentication failed)",
+    re.IGNORECASE
+)
+
+# ── IPsec / strongSwan (charon) events ───────────────────────────────────────
+# IKE_SA established: "charon[...]: xx[IKE] IKE_SA tunnel_name[N] established between A...B"
+RE_IPSEC_UP   = re.compile(
+    r"charon\[\d+\].*IKE_SA\s+(\S+)\[(\d+)\]\s+established between\s+([\d.]+)",
+    re.IGNORECASE
+)
+# IKE_SA deleting/destroyed: "charon[...]: xx[IKE] deleting IKE_SA tunnel_name[N]"
+RE_IPSEC_DOWN = re.compile(
+    r"charon\[\d+\].*(deleting|destroying|closing)\s+IKE_SA\s+(\S+)\[(\d+)\]",
+    re.IGNORECASE
+)
+# IKE_SA state change CONNECTING
+RE_IPSEC_CONNECTING = re.compile(
+    r"charon\[\d+\].*IKE_SA\s+(\S+)\[(\d+)\]\s+state change:\s+\w+\s+=>\s+CONNECTING",
+    re.IGNORECASE
+)
+
+# ── OpenVPN events ────────────────────────────────────────────────────────────
+# Connected to peer
+RE_OVPN_CONNECT    = re.compile(
+    r"openvpn\[\d+\].*Peer Connection Initiated with\s+\[AF_INET[6]?\]([\d.:]+):(\d+)",
+    re.IGNORECASE
+)
+# TLS or connection error
+RE_OVPN_ERROR      = re.compile(
+    r"openvpn\[\d+\].*(TLS Error|TLS handshake failed|Connection reset|"
+    r"SIGUSR1|process exiting|AUTH_FAILED)",
+    re.IGNORECASE
+)
+# OpenVPN CONNECTED SUCCESS line
+RE_OVPN_CONNECTED  = re.compile(r"openvpn\[\d+\].*CONNECTED SUCCESS", re.IGNORECASE)
+
+# ── Auth / Security events ────────────────────────────────────────────────────
+# SSH login failed
+RE_AUTH_FAIL_SSH    = re.compile(
+    r"sshd\[\d+\][^:]*:\s+Failed (?:password|publickey) for (\S+) from ([\d.]+)",
+    re.IGNORECASE
+)
+# Invalid/nonexistent user attempt
+RE_AUTH_INVALID_SSH = re.compile(
+    r"sshd\[\d+\][^:]*:\s+Invalid user (\S+) from ([\d.]+)",
+    re.IGNORECASE
+)
+# Successful SSH login
+RE_AUTH_OK_SSH      = re.compile(
+    r"sshd\[\d+\][^:]*:\s+Accepted (?:password|publickey|keyboard-interactive\S*) for (\S+) from ([\d.]+)",
+    re.IGNORECASE
+)
+# pfSense GUI / php-fpm auth failure
+RE_AUTH_FAIL_GUI    = re.compile(
+    r"php(?:-fpm)?\[\d+\][^:]*:\s+.*(?:authentication error|Wrong password|login failed).*user[:\s]+['\"]?(\S+?)['\"]?",
+    re.IGNORECASE
+)
 
 
 def parse_line(line):
@@ -401,6 +598,78 @@ def parse_line(line):
 
     if RE_SHUTDOWN.search(line):
         return {"type": "system", "event": "shutdown", "pfsense": pfsense}
+
+    # ── PPP / PPPoE WAN ──────────────────────────────────────────────────────
+    m = RE_PPP_CONNECT.search(line)
+    if m:
+        return {"type": "ppp", "event": "connect",
+                "interface": m.group(1), "pfsense": pfsense}
+
+    m = RE_PPP_REMOTE_IP.search(line)
+    if m:
+        return {"type": "ppp", "event": "remote_ip",
+                "remote_ip": m.group(1), "pfsense": pfsense}
+
+    m = RE_PPP_DISCONNECT.search(line)
+    if m:
+        return {"type": "ppp", "event": "disconnect",
+                "reason": m.group(1), "pfsense": pfsense}
+
+    m = RE_PPP_AUTH_FAIL.search(line)
+    if m:
+        return {"type": "ppp", "event": "auth_fail",
+                "reason": m.group(1), "pfsense": pfsense}
+
+    # ── IPsec ────────────────────────────────────────────────────────────────
+    m = RE_IPSEC_UP.search(line)
+    if m:
+        return {"type": "ipsec", "event": "up",
+                "tunnel": m.group(1), "peer_ip": m.group(3), "pfsense": pfsense}
+
+    m = RE_IPSEC_DOWN.search(line)
+    if m:
+        return {"type": "ipsec", "event": "down",
+                "tunnel": m.group(2), "pfsense": pfsense}
+
+    m = RE_IPSEC_CONNECTING.search(line)
+    if m:
+        return {"type": "ipsec", "event": "connecting",
+                "tunnel": m.group(1), "pfsense": pfsense}
+
+    # ── OpenVPN ──────────────────────────────────────────────────────────────
+    m = RE_OVPN_CONNECT.search(line)
+    if m:
+        return {"type": "openvpn", "event": "connect",
+                "peer": m.group(1), "port": m.group(2), "pfsense": pfsense}
+
+    if RE_OVPN_CONNECTED.search(line):
+        return {"type": "openvpn", "event": "connected", "pfsense": pfsense}
+
+    m = RE_OVPN_ERROR.search(line)
+    if m:
+        return {"type": "openvpn", "event": "error",
+                "reason": m.group(1), "pfsense": pfsense}
+
+    # ── Auth / Security ──────────────────────────────────────────────────────
+    m = RE_AUTH_FAIL_SSH.search(line)
+    if m:
+        return {"type": "auth", "event": "fail",
+                "user": m.group(1), "src_ip": m.group(2), "pfsense": pfsense}
+
+    m = RE_AUTH_INVALID_SSH.search(line)
+    if m:
+        return {"type": "auth", "event": "invalid",
+                "user": m.group(1), "src_ip": m.group(2), "pfsense": pfsense}
+
+    m = RE_AUTH_OK_SSH.search(line)
+    if m:
+        return {"type": "auth", "event": "ok",
+                "user": m.group(1), "src_ip": m.group(2), "pfsense": pfsense}
+
+    m = RE_AUTH_FAIL_GUI.search(line)
+    if m:
+        return {"type": "auth", "event": "fail_gui",
+                "user": m.group(1), "src_ip": "", "pfsense": pfsense}
 
     return None
 
@@ -490,96 +759,203 @@ def process_event(event, state, cfg):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Watch mode — pure Python log tailer (no subprocess)
+# Watch mode — multi-file log tailer using threads
 # ─────────────────────────────────────────────────────────────────────────────
 
-def watch_log(cfg):
-    """Daemon: tail log_file and process gateway events."""
-    log_path = cfg["log_file"]
-    state    = load_state(cfg["state_file"])
-    buf      = PendingBuffer(cfg["delay_seconds"])
+# Keywords covering ALL event types across all log files
+_WATCH_KEYS = (
+    "MONITOR:", "|online|", "|offline|", "|down|",
+    "DynDNS updated", "Bootup complete", "pfSense will shutdown",
+    "pppd[", "Connect:", "Connection terminated", "LCP terminated",
+    "PAP authentication failed", "CHAP authentication failed",
+    "IKE_SA", "established between", "deleting IKE_SA",
+    "openvpn[", "TLS Error", "CONNECTED", "Connection reset",
+    "Failed password", "Invalid user ", "Accepted password",
+    "Accepted publickey", "authentication error",
+)
 
-    # Anti-spam state (không dùng cho DynDNS — mỗi cập nhật IP đều gửi)
 
-    _log("👀 Đang theo dõi: %s" % log_path)
-    _log("📡 Telegram chat: %s" % cfg["telegram_chat_id"])
-    _log("⏳ Trì hoãn cảnh báo: %ds | 🔕 Chặn spam: %ds" % (
-        cfg["delay_seconds"], cfg["spam_cooldown"]))
-
-    # Keyword filter covering all event types
-    WATCH_KEYS = ("MONITOR:", "|online|", "|offline|", "|down|",
-                  "DynDNS updated", "Bootup complete", "pfSense will shutdown")
-
-    # Open file and seek to end
+def _tail_worker(log_path, out_queue):
+    """Background thread: tail a single log file, put parsed events into queue."""
     try:
         fh = open(log_path, "r", encoding="utf-8", errors="replace")
-    except OSError as e:
-        _err("Không thể mở file log: %s" % e)
-        sys.exit(1)
+    except OSError:
+        _log("[%s] ⚠️  File không tồn tại — bỏ qua" % log_path)
+        return
 
-    fh.seek(0, 2)  # Seek to end
+    fh.seek(0, 2)
     inode = os.fstat(fh.fileno()).st_ino
+    _log("[%s] 👀 Bắt đầu theo dõi" % log_path)
+
+    while True:
+        try:
+            cur_inode = os.stat(log_path).st_ino
+        except OSError:
+            cur_inode = inode
+
+        if cur_inode != inode:
+            fh.close()
+            try:
+                fh = open(log_path, "r", encoding="utf-8", errors="replace")
+                inode = os.fstat(fh.fileno()).st_ino
+                _log("[%s] 🔄 Log xoay vòng — đã mở lại" % log_path)
+            except OSError:
+                time.sleep(2)
+                continue
+
+        for line in fh:
+            line = line.rstrip("\n\r")
+            if not any(k in line for k in _WATCH_KEYS):
+                continue
+            event = parse_line(line)
+            if event:
+                out_queue.put(event)
+
+        time.sleep(0.3)
+
+
+def watch_log(cfg):
+    """Daemon: tail multiple log files (one thread each) and dispatch events."""
+    log_files = cfg.get("log_files", [cfg.get("log_file", "/var/log/gateways.log")])
+    state     = load_state(cfg["state_file"])
+    buf       = PendingBuffer(cfg["delay_seconds"])
+    ev_queue  = queue.Queue()
+
+    # Brute-force tracker: src_ip -> list of timestamps
+    brute_tracker = {}
+
+    _log("📡 Telegram chat: %s" % cfg["telegram_chat_id"])
+    _log("⏳ Trì hoãn cảnh báo: %ds | 🔕 Chặn spam gateway: %ds" % (
+        cfg["delay_seconds"], cfg["spam_cooldown"]))
+    _log("📂 Theo dõi %d file log:" % len(log_files))
+    for lf in log_files:
+        _log("   • %s" % lf)
+
+    # Start one tailer thread per log file
+    for lf in log_files:
+        t = threading.Thread(target=_tail_worker, args=(lf, ev_queue), daemon=True)
+        t.start()
 
     try:
         while True:
-            # Detect log rotation
-            try:
-                cur_inode = os.stat(log_path).st_ino
-            except OSError:
-                cur_inode = inode
-
-            if cur_inode != inode:
-                _log("🔄 Log đã xoay vòng — đang mở lại")
-                fh.close()
-                fh = open(log_path, "r", encoding="utf-8", errors="replace")
-                inode = os.fstat(fh.fileno()).st_ino
-
-            # Read new lines
-            for line in fh:
-                line = line.rstrip("\n\r")
-                if not any(k in line for k in WATCH_KEYS):
-                    continue
-                event = parse_line(line)
-                if not event:
-                    continue
+            # Drain the queue
+            while not ev_queue.empty():
+                try:
+                    event = ev_queue.get_nowait()
+                except queue.Empty:
+                    break
 
                 etype = event.get("type")
+                ps    = event.get("pfsense", "")
 
+                # ── Gateway events → pending buffer ──────────────────────────
                 if etype in ("action", "stats"):
-                    _log("[PHÂN TÍCH] %s → %s" % (event.get("gateway"), event.get("status")))
+                    _log("[GW] %s → %s" % (event.get("gateway"), event.get("status")))
                     buf.add(event)
 
+                # ── DynDNS ───────────────────────────────────────────────────
                 elif etype == "dyndns":
                     msg = format_dyndns_message(
-                        hostname = event["hostname"],
-                        isp      = event["isp"],
-                        iface    = event["iface"],
-                        new_ip   = event["new_ip"],
-                        pfsense  = event.get("pfsense", ""),
-                    )
+                        hostname=event["hostname"], isp=event["isp"],
+                        iface=event["iface"], new_ip=event["new_ip"], pfsense=ps)
                     ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg)
-                    if ok:
-                        _log("[DynDNS] ✅ %s → %s" % (event["hostname"], event["new_ip"]))
-                    else:
-                        _log("[DynDNS] ❌ gửi thất bại")
+                    _log("[DynDNS] %s %s → %s" % ("✅" if ok else "❌",
+                                                    event["hostname"], event["new_ip"]))
 
+                # ── System ───────────────────────────────────────────────────
                 elif etype == "system":
-                    msg = format_system_message(event["event"], event.get("pfsense", ""))
+                    msg = format_system_message(event["event"], ps)
                     if msg:
                         ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg)
                         label = "🟢 Khởi động" if event["event"] == "bootup" else "🔴 Tắt máy"
                         _log("[HỆ THỐNG] %s %s" % (label, "✅" if ok else "❌"))
 
-            # Dispatch ready gateway events
+                # ── PPP / PPPoE ──────────────────────────────────────────────
+                elif etype == "ppp":
+                    ev = event["event"]
+                    _log("[PPP] sự kiện: %s" % ev)
+                    # Skip remote_ip if we just sent a connect (minor event)
+                    if ev == "remote_ip":
+                        continue
+                    msg = format_ppp_message(
+                        event=ev,
+                        interface=event.get("interface", ""),
+                        remote_ip=event.get("remote_ip", ""),
+                        reason=event.get("reason", ""),
+                        pfsense=ps)
+                    if msg:
+                        ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg)
+                        _log("[PPP] %s gửi %s" % ("✅" if ok else "❌", ev))
+
+                # ── IPsec ────────────────────────────────────────────────────
+                elif etype == "ipsec":
+                    ev = event["event"]
+                    # Skip "connecting" noise unless tunnel is down
+                    if ev == "connecting":
+                        continue
+                    _log("[IPsec] %s — tunnel: %s" % (ev, event.get("tunnel", "")))
+                    msg = format_ipsec_message(
+                        event=ev, tunnel=event.get("tunnel", ""),
+                        peer_ip=event.get("peer_ip", ""), pfsense=ps)
+                    if msg:
+                        ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg)
+                        _log("[IPsec] %s gửi %s" % ("✅" if ok else "❌", ev))
+
+                # ── OpenVPN ──────────────────────────────────────────────────
+                elif etype == "openvpn":
+                    ev = event["event"]
+                    _log("[OpenVPN] %s" % ev)
+                    msg = format_openvpn_message(
+                        event=ev, peer=event.get("peer", ""),
+                        port=event.get("port", ""), reason=event.get("reason", ""),
+                        pfsense=ps)
+                    if msg:
+                        ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg)
+                        _log("[OpenVPN] %s gửi %s" % ("✅" if ok else "❌", ev))
+
+                # ── Auth / Security ──────────────────────────────────────────
+                elif etype == "auth":
+                    ev     = event["event"]
+                    src_ip = event.get("src_ip", "")
+                    user   = event.get("user", "")
+
+                    if ev in ("fail", "invalid"):
+                        # Track brute force per source IP
+                        now_t = time.time()
+                        window = cfg.get("auth_brute_window", 60)
+                        brute_tracker.setdefault(src_ip, [])
+                        brute_tracker[src_ip] = [
+                            t for t in brute_tracker[src_ip] if now_t - t < window
+                        ]
+                        brute_tracker[src_ip].append(now_t)
+                        count = len(brute_tracker[src_ip])
+                        threshold = cfg.get("auth_brute_threshold", 5)
+
+                        # Send on first attempt, then only at threshold multiples
+                        if count == 1 or count % threshold == 0:
+                            _log("[AUTH] ⚠️  %d lần thất bại từ %s" % (count, src_ip))
+                            msg = format_auth_message(
+                                event=ev, user=user, src_ip=src_ip,
+                                count=count, pfsense=ps)
+                            if msg:
+                                ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg)
+                                _log("[AUTH] %s gửi cảnh báo" % ("✅" if ok else "❌"))
+
+                    elif ev in ("ok", "fail_gui"):
+                        msg = format_auth_message(
+                            event=ev, user=user, src_ip=src_ip, pfsense=ps)
+                        if msg:
+                            ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg)
+                            _log("[AUTH] %s %s từ %s" % ("✅" if ok else "❌", ev, src_ip))
+
+            # Flush ready gateway events
             for event in buf.flush_ready():
                 process_event(event, state, cfg)
 
-            time.sleep(0.5)
+            time.sleep(0.4)
 
     except KeyboardInterrupt:
         _log("⏹️  Đã dừng.")
-    finally:
-        fh.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -592,11 +968,14 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run as daemon watching /var/log/system.log
+  # Run as daemon watching all configured log files
   python3 pfsense_gw_notify.py watch
 
   # Override token/chat from CLI
   python3 pfsense_gw_notify.py watch --token BOT_TOKEN --chat-id CHAT_ID
+
+  # Watch specific log files only
+  python3 pfsense_gw_notify.py watch --logs /var/log/gateways.log /var/log/ppp.log
 
   # Direct call (from shell script on gateway event)
   python3 pfsense_gw_notify.py send \\
@@ -611,8 +990,9 @@ Examples:
     sub.required = True
 
     # ── watch ──
-    wp = sub.add_parser("watch", help="Tail log file (daemon mode)")
-    wp.add_argument("--log",     default=CONFIG["log_file"],        metavar="PATH")
+    wp = sub.add_parser("watch", help="Tail log files (daemon mode)")
+    wp.add_argument("--logs",    default=None, nargs="+", metavar="PATH",
+                    help="Log files to watch (default: CONFIG log_files list)")
     wp.add_argument("--token",   default=CONFIG["telegram_token"],  metavar="TOKEN")
     wp.add_argument("--chat-id", default=CONFIG["telegram_chat_id"],metavar="ID", dest="chat_id")
     wp.add_argument("--delay",   type=int, default=CONFIG["delay_seconds"],   metavar="SEC")
@@ -651,7 +1031,8 @@ def main():
 
     # ── watch mode ──
     if args.mode == "watch":
-        cfg["log_file"]       = args.log
+        if args.logs:
+            cfg["log_files"] = args.logs
         cfg["delay_seconds"]  = args.delay
         cfg["spam_cooldown"]  = args.cooldown
         watch_log(cfg)
