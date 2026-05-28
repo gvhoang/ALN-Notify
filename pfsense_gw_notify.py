@@ -54,7 +54,7 @@ CONFIG = {
         "/var/log/gateways.log",    # Gateway ONLINE/OFFLINE (dpinger) — ưu tiên 1
         "/var/log/system.log",      # Bootup, shutdown, DynDNS
         "/var/log/ppp.log",         # PPPoE WAN kết nối/ngắt kết nối
-        "/var/log/auth.log",        # SSH brute force, đăng nhập trái phép
+        # /var/log/auth.log — đã tắt (SSH quá nhiều thông báo)
     ],
 
     # State file to persist gateway statuses across restarts
@@ -69,10 +69,6 @@ CONFIG = {
     # Packet loss % thresholds
     "high_loss_threshold":     20,   # ⚠️  warn even if "online"
     "critical_loss_threshold": 80,   # 🔴  treat as offline
-
-    # Auth: group brute force alerts within this window (seconds)
-    "auth_brute_window": 60,
-    "auth_brute_threshold": 5,       # alerts per window before escalating
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -428,21 +424,6 @@ RE_PPP_AUTH_FAIL  = re.compile(
 )
 
 # ── Auth / Security events ────────────────────────────────────────────────────
-# SSH login failed
-RE_AUTH_FAIL_SSH    = re.compile(
-    r"sshd\[\d+\][^:]*:\s+Failed (?:password|publickey) for (\S+) from ([\d.]+)",
-    re.IGNORECASE
-)
-# Invalid/nonexistent user attempt
-RE_AUTH_INVALID_SSH = re.compile(
-    r"sshd\[\d+\][^:]*:\s+Invalid user (\S+) from ([\d.]+)",
-    re.IGNORECASE
-)
-# Successful SSH login
-RE_AUTH_OK_SSH      = re.compile(
-    r"sshd\[\d+\][^:]*:\s+Accepted (?:password|publickey|keyboard-interactive\S*) for (\S+) from ([\d.]+)",
-    re.IGNORECASE
-)
 # pfSense GUI / php-fpm auth failure
 RE_AUTH_FAIL_GUI    = re.compile(
     r"php(?:-fpm)?\[\d+\][^:]*:\s+.*(?:authentication error|Wrong password|login failed).*user[:\s]+['\"]?(\S+?)['\"]?",
@@ -550,21 +531,6 @@ def parse_line(line):
                 "reason": m.group(1), "pfsense": pfsense}
 
     # ── Auth / Security ──────────────────────────────────────────────────────
-    m = RE_AUTH_FAIL_SSH.search(line)
-    if m:
-        return {"type": "auth", "event": "fail",
-                "user": m.group(1), "src_ip": m.group(2), "pfsense": pfsense}
-
-    m = RE_AUTH_INVALID_SSH.search(line)
-    if m:
-        return {"type": "auth", "event": "invalid",
-                "user": m.group(1), "src_ip": m.group(2), "pfsense": pfsense}
-
-    m = RE_AUTH_OK_SSH.search(line)
-    if m:
-        return {"type": "auth", "event": "ok",
-                "user": m.group(1), "src_ip": m.group(2), "pfsense": pfsense}
-
     m = RE_AUTH_FAIL_GUI.search(line)
     if m:
         return {"type": "auth", "event": "fail_gui",
@@ -667,8 +633,7 @@ _WATCH_KEYS = (
     "DynDNS updated", "phpDynDNS", "Bootup complete", "pfSense will shutdown",
     "pppd[", "Connect:", "Connection terminated", "LCP terminated",
     "PAP authentication failed", "CHAP authentication failed",
-    "Failed password", "Invalid user ", "Accepted password",
-    "Accepted publickey", "authentication error",
+    "authentication error",
 )
 
 
@@ -718,9 +683,6 @@ def watch_log(cfg):
     buf       = PendingBuffer(cfg["delay_seconds"])
     ev_queue  = queue.Queue()
     local_fqdn = get_pfsense_fqdn()
-
-    # Brute-force tracker: src_ip -> list of timestamps
-    brute_tracker = {}
 
     _log("🖥️  Máy chủ: %s" % local_fqdn)
     _log("📡 Telegram chat: %s" % cfg["telegram_chat_id"])
@@ -786,40 +748,16 @@ def watch_log(cfg):
                         ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg)
                         _log("[PPP] %s gửi %s" % ("✅" if ok else "❌", ev))
 
-                # ── Auth / Security ──────────────────────────────────────────
+                # ── Auth / Security (GUI only) ───────────────────────────────
                 elif etype == "auth":
                     ev     = event["event"]
                     src_ip = event.get("src_ip", "")
                     user   = event.get("user", "")
-
-                    if ev in ("fail", "invalid"):
-                        # Track brute force per source IP
-                        now_t = time.time()
-                        window = cfg.get("auth_brute_window", 60)
-                        brute_tracker.setdefault(src_ip, [])
-                        brute_tracker[src_ip] = [
-                            t for t in brute_tracker[src_ip] if now_t - t < window
-                        ]
-                        brute_tracker[src_ip].append(now_t)
-                        count = len(brute_tracker[src_ip])
-                        threshold = cfg.get("auth_brute_threshold", 5)
-
-                        # Send on first attempt, then only at threshold multiples
-                        if count == 1 or count % threshold == 0:
-                            _log("[AUTH] ⚠️  %d lần thất bại từ %s" % (count, src_ip))
-                            msg = format_auth_message(
-                                event=ev, user=user, src_ip=src_ip,
-                                count=count, pfsense=ps)
-                            if msg:
-                                ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg)
-                                _log("[AUTH] %s gửi cảnh báo" % ("✅" if ok else "❌"))
-
-                    elif ev in ("ok", "fail_gui"):
-                        msg = format_auth_message(
-                            event=ev, user=user, src_ip=src_ip, pfsense=ps)
-                        if msg:
-                            ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg)
-                            _log("[AUTH] %s %s từ %s" % ("✅" if ok else "❌", ev, src_ip))
+                    msg = format_auth_message(
+                        event=ev, user=user, src_ip=src_ip, pfsense=ps)
+                    if msg:
+                        ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg)
+                        _log("[AUTH] %s %s" % ("✅" if ok else "❌", ev))
 
             # Flush ready gateway events
             for event in buf.flush_ready():
