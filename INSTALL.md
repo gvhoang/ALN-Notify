@@ -159,6 +159,50 @@ chmod +x /usr/local/etc/rc.d/pf_notify.sh
 
 ---
 
+## Bước 7 — Kiểm tra tự động chạy khi reboot
+
+**Xác nhận điều kiện để tự chạy:**
+
+```tcsh
+# 1. File phải có quyền execute
+ls -la /usr/local/etc/rc.d/pf_notify.sh
+# Phải thấy: -rwxr-xr-x
+
+# 2. File Python phải tồn tại đúng vị trí
+ls -la /root/pfsense_gw_notify.py
+
+# 3. Config phải hợp lệ
+python3.11 /root/pfsense_gw_notify.py test 2>&1 | head -5
+```
+
+**Test thực tế (khởi động lại và kiểm tra):**
+
+```tcsh
+# Reboot pfSense
+reboot
+```
+
+Sau khi boot xong (~60 giây), đăng nhập SSH và kiểm tra:
+
+```tcsh
+# Daemon có đang chạy không?
+/usr/local/etc/rc.d/pf_notify.sh status
+
+# Log có ghi từ thời điểm boot không?
+tail -20 /var/log/pf_notify.log
+
+# Xem thời điểm khởi động của process
+ps aux | grep pfsense_gw_notify | grep -v grep
+```
+
+**Kết quả mong đợi:**
+- `pf_notify running (PID: XXXXX)`
+- Log có dòng `👀 Bắt đầu theo dõi` với timestamp sau thời điểm reboot
+
+> **Cơ chế:** pfSense tự động gọi tất cả `*.sh` trong `/usr/local/etc/rc.d/` với tham số `start` khi hệ thống khởi động — không cần cấu hình thêm.
+
+---
+
 ## Lệnh quản lý hàng ngày
 
 ```tcsh
