@@ -30,6 +30,7 @@ import json
 import time
 import sys
 import os
+import socket
 import argparse
 import threading
 import queue
@@ -816,6 +817,73 @@ def watch_log(cfg):
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _collect_recent_events(cfg, max_lines=300, max_events=5):
+    """Read tails of all configured log files, return up to max_events parsed events."""
+    log_files = cfg.get("log_files", [])
+    events = []
+    for lf in log_files:
+        try:
+            with open(lf, "r", encoding="utf-8", errors="replace") as fh:
+                lines = fh.readlines()
+            for line in lines[-max_lines:]:
+                line = line.rstrip("\n\r")
+                if not any(k in line for k in _WATCH_KEYS):
+                    continue
+                ev = parse_line(line)
+                if ev:
+                    events.append(ev)
+        except OSError:
+            continue
+    # Deduplicate: keep last occurrence per (type, gateway/event key, status)
+    seen = {}
+    for ev in events:
+        key = (ev.get("type"), ev.get("gateway", ""), ev.get("status", ""),
+               ev.get("event", ""), ev.get("src_ip", ""))
+        seen[key] = ev
+    return list(seen.values())[-max_events:]
+
+
+def _format_event_to_msg(event, pfsense=""):
+    """Dispatch any parsed event dict to the correct formatter."""
+    etype = event.get("type")
+    if etype in ("action", "stats"):
+        return format_message(
+            gateway    = event.get("gateway", ""),
+            status     = event.get("status", ""),
+            monitor_ip = event.get("monitor_ip", ""),
+            gateway_ip = event.get("gateway_ip", ""),
+            rtt_avg    = event.get("rtt_avg", ""),
+            rtt_stddev = event.get("rtt_stddev", ""),
+            loss_pct   = float(event.get("loss_pct", 0)),
+            substatus  = event.get("substatus", ""),
+            group      = event.get("group", ""),
+            action     = event.get("action", ""),
+            pfsense    = pfsense,
+        )
+    if etype == "dyndns":
+        return format_dyndns_message(
+            hostname=event.get("hostname", ""), isp=event.get("isp", ""),
+            iface=event.get("iface", ""), new_ip=event.get("new_ip", ""),
+            pfsense=pfsense)
+    if etype == "system":
+        return format_system_message(event.get("event", ""), pfsense)
+    if etype == "ppp":
+        return format_ppp_message(
+            event=event.get("event", ""),
+            interface=event.get("interface", ""),
+            remote_ip=event.get("remote_ip", ""),
+            reason=event.get("reason", ""),
+            pfsense=pfsense)
+    if etype == "auth":
+        return format_auth_message(
+            event=event.get("event", ""),
+            user=event.get("user", ""),
+            src_ip=event.get("src_ip", ""),
+            count=event.get("count", 1),
+            pfsense=pfsense)
+    return None
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         description="pfSense Gateway Telegram Notifier",
@@ -912,45 +980,73 @@ def main():
 
     # ── test mode ──
     elif args.mode == "test":
-        # OFFLINE test
-        offline_msg = format_message(
-            gateway="VIETTEL_TAYNINH", status="offline",
-            monitor_ip="10.123.234.2", gateway_ip="10.123.234.1",
-            rtt_avg="", rtt_stddev="", loss_pct=100.0,
-            substatus="loss", group="FPT_st1", action="removing from",
-        )
-        # ONLINE test
-        online_msg = format_message(
-            gateway="FPT_TAYNINH", status="online",
-            monitor_ip="10.10.88.1", gateway_ip="10.10.88.254",
-            rtt_avg="14.5ms", rtt_stddev="1.2ms", loss_pct=5.0,
-            substatus="none", group="LB_GR", action="adding to",
-        )
-        print("=" * 50)
-        print("XEM TRƯỚC - MẤT KẾT NỐI:")
-        print(offline_msg)
-        print("=" * 50)
-        print("XEM TRƯỚC - KẾT NỐI TRỞ LẠI:")
-        print(online_msg)
-        print("=" * 50)
-
-        token   = cfg["telegram_token"]
-        chat_id = cfg["telegram_chat_id"]
+        hostname = socket.gethostname()
+        token    = cfg["telegram_token"]
+        chat_id  = cfg["telegram_chat_id"]
 
         if "YOUR_BOT_TOKEN" in token:
             print("\n⚠️  Vui lòng cài đặt token trong CONFIG trước khi test!")
             return
 
-        _log("Đang gửi test MẤT KẾT NỐI…")
+        # ── Try real log data first ──────────────────────────────────────────
+        real_events = _collect_recent_events(cfg, max_lines=300, max_events=5)
+
+        if real_events:
+            print("=" * 60)
+            print("📋 Tìm thấy %d sự kiện thực tế gần nhất từ log:" % len(real_events))
+            print("=" * 60)
+            sent = 0
+            for ev in real_events:
+                ps  = ev.get("pfsense") or hostname
+                msg = _format_event_to_msg(ev, ps)
+                if not msg:
+                    continue
+                plain = re.sub(r"<[^>]+>", "", msg)
+                print(plain.strip())
+                print("-" * 40)
+                ok = send_telegram(token, chat_id, msg)
+                if ok:
+                    sent += 1
+                time.sleep(1)
+            if sent:
+                print("✅ Đã gửi %d tin nhắn thực tế thành công!" % sent)
+            else:
+                print("❌ Gửi thất bại — kiểm tra lại token/chat_id.")
+            return
+
+        # ── Fallback: demo data ──────────────────────────────────────────────
+        _log("⚠️  Không đọc được log thực — gửi dữ liệu demo")
+        offline_msg = format_message(
+            gateway="VIETTEL_TAYNINH", status="offline",
+            monitor_ip="10.123.234.2", gateway_ip="10.123.234.1",
+            rtt_avg="", rtt_stddev="", loss_pct=100.0,
+            substatus="loss", group="FPT_st1", action="removing from",
+            pfsense=hostname,
+        )
+        online_msg = format_message(
+            gateway="FPT_TAYNINH", status="online",
+            monitor_ip="10.10.88.1", gateway_ip="10.10.88.254",
+            rtt_avg="14.5ms", rtt_stddev="1.2ms", loss_pct=5.0,
+            substatus="none", group="LB_GR", action="adding to",
+            pfsense=hostname,
+        )
+        for label, msg in [("[DEMO] MẤT KẾT NỐI", offline_msg),
+                            ("[DEMO] KẾT NỐI TRỞ LẠI", online_msg)]:
+            print("=" * 50)
+            print(label)
+            print(re.sub(r"<[^>]+>", "", msg).strip())
+        print("=" * 50)
+
+        _log("Đang gửi demo MẤT KẾT NỐI…")
         ok1 = send_telegram(token, chat_id, offline_msg)
         time.sleep(2)
-        _log("Đang gửi test KẾT NỐI TRỞ LẠI…")
+        _log("Đang gửi demo KẾT NỐI TRỞ LẠI…")
         ok2 = send_telegram(token, chat_id, online_msg)
 
         if ok1 and ok2:
-            print("✅ Đã gửi cả hai tin nhắn test thành công!")
+            print("✅ Đã gửi cả hai tin nhắn demo thành công!")
         else:
-            print("❌ Một hoặc nhiều tin nhắn thất bại. Kiểm tra lại token/chat_id.")
+            print("❌ Một hoặc nhiều tin nhắn thất bại — kiểm tra lại token/chat_id.")
 
 
 if __name__ == "__main__":
