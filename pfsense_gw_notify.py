@@ -79,10 +79,10 @@ ISP_MAP = {
 }
 
 SUBSTATUS_LABELS = {
-    "loss":      "📉 Loss threshold exceeded",
-    "delay":     "⏳ Delay threshold exceeded",
-    "highdelay": "⏳ High delay detected",
-    "highloss":  "📉 High loss detected",
+    "loss":      "📉 Vượt ngưỡng mất gói tin",
+    "delay":     "⏳ Vượt ngưỡng độ trễ",
+    "highdelay": "⏳ Phát hiện độ trễ cao",
+    "highloss":  "📉 Phát hiện mất gói tin cao",
     "none":      "",
     "":          "",
 }
@@ -98,7 +98,7 @@ def detect_isp(name):
     for key, info in ISP_MAP.items():
         if key in upper:
             return info
-    return {"icon": "🌐", "label": "Unknown"}
+    return {"icon": "🌐", "label": "Không xác định"}
 
 
 def load_state(path):
@@ -114,7 +114,7 @@ def save_state(path, state):
         with open(path, "w") as f:
             json.dump(state, f, indent=2)
     except OSError as e:
-        _err("Cannot save state: %s" % e)
+        _err("Không thể lưu trạng thái: %s" % e)
 
 
 def should_send(state, gateway, new_status, cooldown):
@@ -157,7 +157,7 @@ def send_telegram(token, chat_id, text):
     except urllib.error.HTTPError as e:
         _err("Telegram HTTP %d: %s" % (e.code, e.read().decode()))
     except Exception as e:
-        _err("Telegram send failed: %s" % e)
+        _err("Gửi Telegram thất bại: %s" % e)
     return False
 
 
@@ -174,37 +174,37 @@ def format_message(gateway, status, monitor_ip="", gateway_ip="",
 
     # ── Header ──
     if status == "offline":
-        header = "🔴 <b>GATEWAY OFFLINE</b>"
+        header = "🔴 <b>GATEWAY MẤT KẾT NỐI</b>"
     elif status == "online":
-        header = "🟢 <b>GATEWAY ONLINE</b>"
+        header = "🟢 <b>GATEWAY KẾT NỐI TRỞ LẠI</b>"
     else:
-        header = "⚠️ <b>GATEWAY ALERT</b>"
+        header = "⚠️ <b>CẢNH BÁO GATEWAY</b>"
 
     lines = [header, ""]
 
     # ── WAN identity ──
     lines.append("🌐 WAN: <code>%s</code>" % gateway)
     if monitor_ip:
-        lines.append("📡 Monitor: <code>%s</code>" % monitor_ip)
+        lines.append("📡 IP Giám sát: <code>%s</code>" % monitor_ip)
     if gateway_ip:
-        lines.append("🔗 Gateway IP: <code>%s</code>" % gateway_ip)
+        lines.append("🔗 IP Gateway: <code>%s</code>" % gateway_ip)
 
     lines.append("")
 
     # ── Loss & RTT ──
     if loss_pct >= 100:
-        lines.append("⚠️ Packet loss: <b>100%</b>")
-        lines.append("⚠️ RTT timeout")
+        lines.append("⚠️ Mất gói tin: <b>100%</b>")
+        lines.append("⚠️ Hết thời gian chờ RTT")
     else:
         if loss_pct > 0:
             icon = "⚠️" if loss_pct >= CONFIG["high_loss_threshold"] else "📊"
-            lines.append("%s Packet loss: <b>%.0f%%</b>" % (icon, loss_pct))
+            lines.append("%s Mất gói tin: <b>%.0f%%</b>" % (icon, loss_pct))
         if rtt_avg and rtt_avg not in ("~", "0.000ms", "0ms", ""):
             lines.append("⏱️ RTT: %s" % rtt_avg)
             if rtt_stddev and rtt_stddev not in ("~", "0.000ms", ""):
                 lines[-1] += " ± %s" % rtt_stddev
         elif status == "offline":
-            lines.append("⚠️ RTT timeout")
+            lines.append("⚠️ Hết thời gian chờ RTT")
 
     # ── Substatus detail ──
     sub_label = SUBSTATUS_LABELS.get(substatus.lower() if substatus else "", "")
@@ -218,9 +218,9 @@ def format_message(gateway, status, monitor_ip="", gateway_ip="",
     # ── Routing group ──
     if group:
         if status == "offline" or "remov" in action.lower():
-            lines.append("🛣️ Removed from:")
+            lines.append("🛣️ Rút khỏi nhóm định tuyến:")
         else:
-            lines.append("🛣️ Added to:")
+            lines.append("🛣️ Thêm vào nhóm định tuyến:")
         lines.append("<code>%s</code>" % group)
         lines.append("")
 
@@ -349,7 +349,7 @@ def process_event(event, state, cfg):
         return
 
     if not should_send(state, gw, status, cfg["spam_cooldown"]):
-        _log("[%s] ⏭️  anti-spam skip (%s)" % (gw, status))
+        _log("[%s] ⏭️  chống spam - bỏ qua (%s)" % (gw, status))
         return
 
     # Treat as offline if critically high loss despite "online" status
@@ -357,7 +357,7 @@ def process_event(event, state, cfg):
     effective_status = status
     if status == "online" and loss >= cfg["critical_loss_threshold"]:
         effective_status = "offline"
-        _log("[%s] 📉 critical loss %.0f%% — escalating to OFFLINE alert" % (gw, loss))
+        _log("[%s] 📉 mất gói nghiêm trọng %.0f%% — leo thang cảnh báo MẤT KẾT NỐI" % (gw, loss))
 
     msg = format_message(
         gateway    = gw,
@@ -378,9 +378,9 @@ def process_event(event, state, cfg):
         state[gw]["status"]    = status
         state[gw]["last_sent"] = time.time()
         save_state(cfg["state_file"], state)
-        _log("[%s] ✅ sent %s (loss=%.0f%%)" % (gw, status, loss))
+        _log("[%s] ✅ đã gửi %s (mất gói=%.0f%%)" % (gw, status, loss))
     else:
-        _log("[%s] ❌ send failed" % gw)
+        _log("[%s] ❌ gửi thất bại" % gw)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -393,16 +393,16 @@ def watch_log(cfg):
     state    = load_state(cfg["state_file"])
     buf      = PendingBuffer(cfg["delay_seconds"])
 
-    _log("👀 Watching: %s" % log_path)
+    _log("👀 Đang theo dõi: %s" % log_path)
     _log("📡 Telegram chat: %s" % cfg["telegram_chat_id"])
-    _log("⏳ Alert delay: %ds | 🔕 Cooldown: %ds" % (
+    _log("⏳ Trì hoãn cảnh báo: %ds | 🔕 Chặn spam: %ds" % (
         cfg["delay_seconds"], cfg["spam_cooldown"]))
 
     # Open file and seek to end
     try:
         fh = open(log_path, "r", encoding="utf-8", errors="replace")
     except OSError as e:
-        _err("Cannot open log: %s" % e)
+        _err("Không thể mở file log: %s" % e)
         sys.exit(1)
 
     fh.seek(0, 2)  # Seek to end
@@ -417,7 +417,7 @@ def watch_log(cfg):
                 cur_inode = inode
 
             if cur_inode != inode:
-                _log("🔄 Log rotated — reopening")
+                _log("🔄 Log đã xoay vòng — đang mở lại")
                 fh.close()
                 fh = open(log_path, "r", encoding="utf-8", errors="replace")
                 inode = os.fstat(fh.fileno()).st_ino
@@ -429,7 +429,7 @@ def watch_log(cfg):
                     continue
                 event = parse_line(line)
                 if event:
-                    _log("[PARSE] %s → %s" % (event.get("gateway"), event.get("status")))
+                    _log("[PHÂN TÍCH] %s → %s" % (event.get("gateway"), event.get("status")))
                     buf.add(event)
 
             # Dispatch ready events
@@ -439,7 +439,7 @@ def watch_log(cfg):
             time.sleep(0.5)
 
     except KeyboardInterrupt:
-        _log("⏹️  Stopped.")
+        _log("⏹️  Đã dừng.")
     finally:
         fh.close()
 
@@ -522,7 +522,7 @@ def main():
     elif args.mode == "send":
         state = load_state(cfg["state_file"])
         if not args.no_delay and cfg["delay_seconds"] > 0:
-            _log("⏳ Waiting %ds before sending…" % cfg["delay_seconds"])
+            _log("⏳ Đợi %d giây trước khi gửi…" % cfg["delay_seconds"])
             time.sleep(cfg["delay_seconds"])
         event = {
             "gateway":    args.gateway,
@@ -554,10 +554,10 @@ def main():
             substatus="none", group="LB_GR", action="adding to",
         )
         print("=" * 50)
-        print("OFFLINE preview:")
+        print("XEM TRƯỚC - MẤT KẾT NỐI:")
         print(offline_msg)
         print("=" * 50)
-        print("ONLINE preview:")
+        print("XEM TRƯỚC - KẾT NỐI TRỞ LẠI:")
         print(online_msg)
         print("=" * 50)
 
@@ -565,19 +565,19 @@ def main():
         chat_id = cfg["telegram_chat_id"]
 
         if "YOUR_BOT_TOKEN" in token:
-            print("\n⚠️  Set your token in CONFIG before testing!")
+            print("\n⚠️  Vui lòng cài đặt token trong CONFIG trước khi test!")
             return
 
-        _log("Sending OFFLINE test…")
+        _log("Đang gửi test MẤT KẾT NỐI…")
         ok1 = send_telegram(token, chat_id, offline_msg)
         time.sleep(2)
-        _log("Sending ONLINE test…")
+        _log("Đang gửi test KẾT NỐI TRỞ LẠI…")
         ok2 = send_telegram(token, chat_id, online_msg)
 
         if ok1 and ok2:
-            print("✅ Both test messages sent!")
+            print("✅ Đã gửi cả hai tin nhắn test thành công!")
         else:
-            print("❌ One or more messages failed. Check token/chat_id.")
+            print("❌ Một hoặc nhiều tin nhắn thất bại. Kiểm tra lại token/chat_id.")
 
 
 if __name__ == "__main__":
