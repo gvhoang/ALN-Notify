@@ -118,12 +118,14 @@ cat > /usr/local/etc/rc.d/pf_notify.sh << 'EOF'
 #!/bin/sh
 case "$1" in
 start)
+    pkill -f pfsense_gw_notify.py 2>/dev/null
+    sleep 1
     nohup /usr/local/bin/python3.11 /root/pfsense_gw_notify.py watch >> /var/log/pf_notify.log 2>&1 &
     echo $! > /var/run/pf_notify.pid
     echo "pf_notify started (PID: $(cat /var/run/pf_notify.pid))"
     ;;
 stop)
-    kill `cat /var/run/pf_notify.pid 2>/dev/null` 2>/dev/null
+    pkill -f pfsense_gw_notify.py 2>/dev/null
     rm -f /var/run/pf_notify.pid
     echo "pf_notify stopped"
     ;;
