@@ -6,7 +6,7 @@
 # Make executable: chmod +x /root/pfsense_gw_notify_hook.sh
 # ─────────────────────────────────────────────────────────────────
 
-PYTHON="/usr/local/bin/python3"
+PYTHON="/usr/local/bin/python3.11"
 SCRIPT="/root/pfsense_gw_notify.py"
 
 # ── Daemon mode (watch all configured log files) ─────────────────
