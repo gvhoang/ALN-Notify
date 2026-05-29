@@ -85,8 +85,6 @@ $log_count     = count((array)$pf_cfg['log_files']);
 #pfn-app .btn-ghost { background: transparent; border-color: transparent; color: var(--muted); }
 #pfn-app .btn-ghost:hover { background: var(--panel-2); color: var(--text); }
 /* ── Layout ─────────────────────────────────────────────────────────── */
-#pfn-app .breadcrumb { color: var(--muted); font-size: 12px; margin: 0 0 10px; }
-#pfn-app .breadcrumb strong { color: var(--primary); font-weight: 700; }
 #pfn-app .masthead {
     background: var(--panel); border: 1px solid var(--line);
     border-radius: var(--radius); box-shadow: var(--shadow);
@@ -224,8 +222,6 @@ $log_count     = count((array)$pf_cfg['log_files']);
 </svg>
 
 <div id="pfn-app">
-
-  <div class="breadcrumb">Diagnostics / <strong>PF Notify</strong></div>
 
   <!-- Masthead -->
   <section class="masthead">
