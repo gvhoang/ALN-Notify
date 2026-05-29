@@ -190,6 +190,19 @@ $log_count     = count((array)$pf_cfg['log_files']);
 }
 #pfn-app pre.log::-webkit-scrollbar { width:5px; }
 #pfn-app pre.log::-webkit-scrollbar-thumb { background:#2a3547; border-radius:3px; }
+/* ── Toggle Switch ──────────────────────────────────────────────────── */
+#pfn-app .switch {
+    width:42px; height:24px; border-radius:999px; border:0;
+    background:#2a3547; padding:2px;
+    display:inline-flex; align-items:center; transition:background .12s;
+    flex:0 0 auto; cursor:pointer;
+}
+#pfn-app .switch span {
+    width:20px; height:20px; background:#fff; border-radius:50%;
+    box-shadow:0 1px 4px rgba(0,0,0,.3); transition:transform .12s;
+}
+#pfn-app .switch[aria-checked="true"]      { background: var(--primary); }
+#pfn-app .switch[aria-checked="true"] span { transform: translateX(18px); }
 /* ── Svc msg ────────────────────────────────────────────────────────── */
 #pfn-svc-msg { font-size:12px; color:var(--muted); font-style:italic; }
 /* ── Responsive ─────────────────────────────────────────────────────── */
@@ -278,6 +291,30 @@ $log_count     = count((array)$pf_cfg['log_files']);
             </div>
           </div>
           <div id="pfn-test-result" class="notice" hidden></div>
+
+          <!-- Forum Topics -->
+          <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line);">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:10px;">
+              <div>
+                <div style="font-size:13px;font-weight:700;color:var(--text);">🗂️ Gửi vào Telegram Forum Topics</div>
+                <p class="hint" style="margin:4px 0 0;">Tự động tạo topic riêng cho server này trong Supergroup (bot phải là Admin)</p>
+              </div>
+              <button type="button" class="switch" id="pfn-topics-switch"
+                aria-checked="<?= $pf_cfg['use_topics'] ? 'true' : 'false' ?>"
+                aria-label="Dùng Topics">
+                <span></span>
+              </button>
+            </div>
+            <div id="pfn-topics-extra" style="<?= $pf_cfg['use_topics'] ? '' : 'display:none;' ?>">
+              <div class="field">
+                <label for="topic_name">Tên Topic <span style="font-weight:400;">(để trống = tự lấy hostname)</span></label>
+                <input class="input" id="topic_name" type="text"
+                       value="<?= htmlspecialchars($pf_cfg['topic_name']) ?>"
+                       placeholder="homehoag">
+                <p class="hint">Chat ID phải là <code>-100xxxxxxx</code> (Supergroup)</p>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -527,6 +564,13 @@ $log_count     = count((array)$pf_cfg['log_files']);
         $t.attr('type', $t.attr('type') === 'password' ? 'text' : 'password');
     });
 
+    // ── Topics toggle ─────────────────────────────────────────────────────
+    $('#pfn-topics-switch').click(function () {
+        var on = $(this).attr('aria-checked') !== 'true';
+        $(this).attr('aria-checked', String(on));
+        if (on) $('#pfn-topics-extra').show(); else $('#pfn-topics-extra').hide();
+    });
+
     // ── Test ──────────────────────────────────────────────────────────────
     $('#pfn-test-btn').click(function () {
         var $r = $('#pfn-test-result');
@@ -559,7 +603,9 @@ $log_count     = count((array)$pf_cfg['log_files']);
             gui_fail_threshold: parseInt($('#gui_fail_threshold').val(), 10),
             retry_count:        parseInt($('#retry_count').val(), 10),
             retry_backoff:      parseInt($('#retry_backoff').val(), 10),
-            rate_limit_per_min: parseInt($('#rate_limit_per_min').val(), 10)
+            rate_limit_per_min: parseInt($('#rate_limit_per_min').val(), 10),
+            use_topics:         $('#pfn-topics-switch').attr('aria-checked') === 'true',
+            topic_name:         $.trim($('#topic_name').val())
         };
         $r.attr('hidden', true);
         $.ajax({

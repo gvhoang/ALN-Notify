@@ -52,6 +52,8 @@ DEFAULT_CFG = {
     "retry_count":               3,
     "retry_backoff":             2,
     "rate_limit_per_min":        10,
+    "use_topics":                False,
+    "topic_name":                "",
 }
 
 
@@ -179,19 +181,24 @@ def _rate_allowed(limit_per_min):
 # Telegram sender — retry + exponential backoff
 # ─────────────────────────────────────────────────────────────────────────────
 
-def send_telegram(token, chat_id, text, retry=3, backoff=2, rate_limit=10):
-    """Gửi HTML message qua Telegram Bot API. Có retry + backoff + rate limit."""
+def send_telegram(token, chat_id, text, retry=3, backoff=2, rate_limit=10, thread_id=None):
+    """Gửi HTML message qua Telegram Bot API. Có retry + backoff + rate limit.
+    Nếu thread_id được cung cấp → gửi vào Forum Topic đó (Supergroup Topics)."""
     if not _rate_allowed(rate_limit):
         _err("⏸️  Rate limit: tạm dừng gửi Telegram")
         return False
 
     url = "https://api.telegram.org/bot%s/sendMessage" % token
-    payload = urllib.parse.urlencode({
+    params = {
         "chat_id":                  chat_id,
         "text":                     text,
         "parse_mode":               "HTML",
         "disable_web_page_preview": "true",
-    }).encode("utf-8")
+    }
+    if thread_id:
+        params["message_thread_id"] = str(thread_id)
+
+    payload = urllib.parse.urlencode(params).encode("utf-8")
 
     for attempt in range(retry + 1):
         try:
@@ -214,6 +221,40 @@ def send_telegram(token, chat_id, text, retry=3, backoff=2, rate_limit=10):
             if attempt < retry:
                 time.sleep(backoff * (2 ** attempt))
     return False
+
+
+def create_telegram_topic(token, chat_id, name):
+    """Tạo Forum Topic mới trong Supergroup. Trả về message_thread_id hoặc None."""
+    url     = "https://api.telegram.org/bot%s/createForumTopic" % token
+    payload = urllib.parse.urlencode({"chat_id": chat_id, "name": name}).encode("utf-8")
+    try:
+        req = urllib.request.Request(url, data=payload, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+            if data.get("ok"):
+                tid = data["result"]["message_thread_id"]
+                _log("[TOPIC] 🗂️  Đã tạo topic '%s' → thread_id=%s" % (name, tid))
+                return tid
+            _err("[TOPIC] Telegram trả lỗi: %s" % data.get("description", ""))
+    except Exception as e:
+        _err("[TOPIC] Không thể tạo topic: %s" % e)
+    return None
+
+
+def get_or_create_topic(cfg, state):
+    """Lấy message_thread_id của topic server này (tạo nếu chưa có, cache vào state).
+    Trả về int thread_id hoặc None nếu use_topics=False hoặc lỗi."""
+    if not cfg.get("use_topics"):
+        return None
+    cached = state.get("_topic_id")
+    if cached:
+        return cached
+    name = cfg.get("topic_name") or get_pfsense_fqdn().split(".")[0]  # short hostname
+    tid  = create_telegram_topic(cfg["telegram_token"], cfg["telegram_chat_id"], name)
+    if tid:
+        state["_topic_id"] = tid
+        save_state(cfg["state_file"], state)
+    return tid
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -538,7 +579,7 @@ class PendingBuffer:
 # Core processing
 # ─────────────────────────────────────────────────────────────────────────────
 
-def process_event(event, state, cfg):
+def process_event(event, state, cfg, thread_id=None):
     gw     = event.get("gateway", "")
     status = event.get("status", "")
     if not gw or not status:
@@ -575,7 +616,8 @@ def process_event(event, state, cfg):
     ok = send_telegram(
         cfg["telegram_token"], cfg["telegram_chat_id"], msg,
         retry=cfg["retry_count"], backoff=cfg["retry_backoff"],
-        rate_limit=cfg["rate_limit_per_min"]
+        rate_limit=cfg["rate_limit_per_min"],
+        thread_id=thread_id,
     )
     if ok:
         state.setdefault(gw, {})
@@ -589,10 +631,10 @@ def process_event(event, state, cfg):
         _log("[%s] ❌ gửi thất bại" % gw)
 
 
-def process_events(events, state, cfg):
+def process_events(events, state, cfg, thread_id=None):
     """Gửi từng GW event riêng biệt (không gộp batch)."""
     for ev in events:
-        process_event(ev, state, cfg)
+        process_event(ev, state, cfg, thread_id=thread_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -664,9 +706,14 @@ def watch_log(cfg):
     local_fqdn = get_pfsense_fqdn()
     gui_fail_tracker = {}
 
+    # Khởi tạo topic nếu use_topics (tạo topic tên hostname lần đầu chạy)
+    topic_id = get_or_create_topic(cfg, state)
+
     def _print_startup(c):
         _log("🖥️  Máy chủ: %s" % local_fqdn)
         _log("📡 Telegram chat: %s" % c["telegram_chat_id"])
+        if c.get("use_topics"):
+            _log("🗂️  Forum Topics: bật | topic_id=%s" % (state.get("_topic_id") or "chưa tạo"))
         _log("⏳ Trì hoãn cảnh báo: %ds | 🔕 Chặn spam: %ds | 🔁 Retry: %d" % (
             c["delay_seconds"], c["spam_cooldown"], c["retry_count"]))
         _log("📊 Rate limit: %d tin/phút" % c["rate_limit_per_min"])
@@ -688,6 +735,7 @@ def watch_log(cfg):
                 new_cfg = load_config()
                 cfg.update(new_cfg)
                 buf.delay = cfg["delay_seconds"]
+                topic_id = get_or_create_topic(cfg, state)
                 _log("🔄 [SIGHUP] Đã reload config")
                 _print_startup(cfg)
 
@@ -708,7 +756,7 @@ def watch_log(cfg):
                     msg = format_dyndns_message(event["hostname"], event["new_ip"], pfsense=ps)
                     ok  = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg,
                                         retry=cfg["retry_count"], backoff=cfg["retry_backoff"],
-                                        rate_limit=cfg["rate_limit_per_min"])
+                                        rate_limit=cfg["rate_limit_per_min"], thread_id=topic_id)
                     _log("[DynDNS] %s %s → %s" % ("✅" if ok else "❌",
                                                     event["hostname"], event["new_ip"]))
 
@@ -717,7 +765,7 @@ def watch_log(cfg):
                     if msg:
                         ok    = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg,
                                               retry=cfg["retry_count"], backoff=cfg["retry_backoff"],
-                                              rate_limit=cfg["rate_limit_per_min"])
+                                              rate_limit=cfg["rate_limit_per_min"], thread_id=topic_id)
                         label = "🟢 Khởi động" if event["event"] == "bootup" else "🔴 Tắt máy"
                         _log("[HỆ THỐNG] %s %s" % (label, "✅" if ok else "❌"))
 
@@ -732,7 +780,7 @@ def watch_log(cfg):
                     if msg:
                         ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg,
                                            retry=cfg["retry_count"], backoff=cfg["retry_backoff"],
-                                           rate_limit=cfg["rate_limit_per_min"])
+                                           rate_limit=cfg["rate_limit_per_min"], thread_id=topic_id)
                         _log("[PPP] %s gửi %s" % ("✅" if ok else "❌", ev))
 
                 elif etype == "auth":
@@ -757,7 +805,8 @@ def watch_log(cfg):
                                 ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"],
                                                    msg, retry=cfg["retry_count"],
                                                    backoff=cfg["retry_backoff"],
-                                                   rate_limit=cfg["rate_limit_per_min"])
+                                                   rate_limit=cfg["rate_limit_per_min"],
+                                                   thread_id=topic_id)
                                 _log("[AUTH] %s GUI fail x%d user=%s" % (
                                     "✅" if ok else "❌", count, user))
                         else:
@@ -768,13 +817,13 @@ def watch_log(cfg):
                         if msg:
                             ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg,
                                                retry=cfg["retry_count"], backoff=cfg["retry_backoff"],
-                                               rate_limit=cfg["rate_limit_per_min"])
+                                               rate_limit=cfg["rate_limit_per_min"], thread_id=topic_id)
                             _log("[AUTH] %s %s" % ("✅" if ok else "❌", ev))
 
             # Flush gateway events (tách biệt từng gateway)
             ready = buf.flush_ready()
             if ready:
-                process_events(ready, state, cfg)
+                process_events(ready, state, cfg, thread_id=topic_id)
 
             time.sleep(0.4)
 

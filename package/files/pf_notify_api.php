@@ -42,6 +42,8 @@ function pf_load_config() {
         'retry_count'               => 3,
         'retry_backoff'             => 2,
         'rate_limit_per_min'        => 10,
+        'use_topics'                => false,
+        'topic_name'                => '',
     ];
     if (file_exists(PF_CONFIG_FILE)) {
         $json = @json_decode(file_get_contents(PF_CONFIG_FILE), true);
@@ -148,6 +150,8 @@ switch ($action) {
             'retry_count'             => $clamp($data['retry_count']        ?? $existing['retry_count'],        0, 10),
             'retry_backoff'           => $clamp($data['retry_backoff']       ?? $existing['retry_backoff'],      1, 30),
             'rate_limit_per_min'      => $clamp($data['rate_limit_per_min']  ?? $existing['rate_limit_per_min'], 0, 120),
+            'use_topics'              => (bool)($data['use_topics'] ?? $existing['use_topics']),
+            'topic_name'              => trim($data['topic_name'] ?? $existing['topic_name']),
         ];
         @mkdir(dirname(PF_CONFIG_FILE), 0750, true);
         $written = file_put_contents(PF_CONFIG_FILE, json_encode($cfg, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
