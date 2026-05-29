@@ -1,0 +1,30 @@
+{
+  "_comment": "Copy file này thành config.json và điền thông tin thực",
+
+  "telegram_token":   "YOUR_BOT_TOKEN_HERE",
+  "telegram_chat_id": "YOUR_CHAT_ID_HERE",
+
+  "log_files": [
+    "/var/log/gateways.log",
+    "/var/log/system.log",
+    "/var/log/ppp.log"
+  ],
+
+  "state_file": "/var/db/pf_notify/state.json",
+
+  "delay_seconds":   3,
+  "spam_cooldown":   300,
+
+  "high_loss_threshold":     20,
+  "critical_loss_threshold": 80,
+
+  "gui_fail_threshold": 3,
+
+  "retry_count":   3,
+  "retry_backoff": 2,
+
+  "rate_limit_per_min": 10,
+
+  "batch_enabled": true,
+  "batch_window":  5
+}
