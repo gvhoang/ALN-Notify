@@ -24,7 +24,7 @@ Hoặc dùng **WinSCP**: kéo thả toàn bộ thư mục `package/` vào `/tmp/
 
 ```bash
 ssh admin@192.168.0.1
-sudo sh /tmp/pf_notify_pkg/install.sh
+sh /tmp/pf_notify_pkg/install.sh
 ```
 
 Installer tự động:
@@ -39,7 +39,7 @@ Installer tự động:
 > **Muốn điền token trước khi khởi động?**  
 > Dùng flag `--no-start`, sau đó vào GUI điền token rồi bấm Start:
 > ```bash
-> sudo sh /tmp/pf_notify_pkg/install.sh --no-start
+>sh /tmp/pf_notify_pkg/install.sh --no-start
 > ```
 
 ### Bước 3 — Mở GUI cấu hình
@@ -64,7 +64,7 @@ ssh admin@192.168.0.1 "mkdir -p /tmp/pf_notify_pkg"
 scp -r package/* admin@192.168.0.1:/tmp/pf_notify_pkg/
 
 # Chạy installer — config được giữ nguyên, code được cập nhật
-ssh admin@192.168.0.1 "sudo sh /tmp/pf_notify_pkg/install.sh"
+ssh root@192.168.0.1 "sh /tmp/pf_notify_pkg/install.sh"
 ```
 
 - Config `/usr/local/etc/pf_notify/config.json` **không bị ghi đè** nếu đã tồn tại
@@ -76,7 +76,7 @@ ssh admin@192.168.0.1 "sudo sh /tmp/pf_notify_pkg/install.sh"
 ## 🗑️ Gỡ cài đặt
 
 ```bash
-ssh admin@192.168.0.1 "sudo sh /tmp/pf_notify_pkg/uninstall.sh"
+ssh root@192.168.0.1 "sh /tmp/pf_notify_pkg/uninstall.sh"
 ```
 
 ---
