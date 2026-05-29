@@ -173,7 +173,8 @@ switch ($action) {
             echo json_encode(['ok' => false, 'error' => 'Chưa cài đặt Chat ID']);
             break;
         }
-        // Gọi Python script gửi log thật, nhưng bỏ qua output chi tiết ở GUI
+        // Gửi test theo log thật để kiểm tra parser/log watcher. Python sẽ tự resolve
+        // message_thread_id nếu bật Topics.
         $ret = null;
         @exec(
             PF_PYTHON . ' ' . escapeshellarg(PF_SCRIPT)

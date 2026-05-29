@@ -95,7 +95,7 @@ else
 fi
 
 # ── Đăng ký menu Services ────────────────────────────────
-info "Đăng ký menu Services > PF Notify..."
+info "Đăng ký menu Services > ALN Notify..."
 php -r "
 require_once('/etc/inc/config.inc');
 require_once('/etc/inc/util.inc');
@@ -106,13 +106,13 @@ foreach (\$config['installedpackages']['menu'] as \$k => \$m) {
         unset(\$config['installedpackages']['menu'][\$k]);
 }
 \$config['installedpackages']['menu'][] = [
-    'name' => 'PF Notify', 'section' => 'Services',
+    'name' => 'ALN Notify', 'section' => 'Services',
     'url' => '/pf_notify.php', 'tooltip' => 'Telegram Gateway Notifier',
 ];
 \$config['installedpackages']['menu'] = array_values(\$config['installedpackages']['menu']);
 write_config('pf_notify: register menu item');
 echo 'OK';
-" 2>/dev/null && ok "Menu Services > PF Notify đã đăng ký" || \
+" 2>/dev/null && ok "Menu Services > ALN Notify đã đăng ký" || \
     warn "Không đăng ký menu tự động được — vào Navigation thêm thủ công"
 
 # ── Kiểm tra doctor ──────────────────────────────────────
@@ -181,5 +181,5 @@ else
     warn "Cài đặt xong nhưng có cảnh báo ở trên — xem lại."
 fi
 info "Truy cập GUI: https://<pfsense-ip>/pf_notify.php"
-info "Hoặc qua menu: Services > PF Notify"
+info "Hoặc qua menu: Services > ALN Notify"
 sep

@@ -25,7 +25,8 @@ start)
     fi
     rm -f "$PIDFILE"
     mkdir -p /var/db/pf_notify
-    /usr/sbin/daemon -f -o "$LOGFILE" -p "$PIDFILE" \
+    # -P (hoa): ghi PID của Python child, không phải daemon wrapper
+    /usr/sbin/daemon -f -o "$LOGFILE" -P "$PIDFILE" \
         "$PYTHON" "$SCRIPT" watch --config "$CONFIG"
     sleep 1
     if _is_running; then
@@ -37,6 +38,8 @@ start)
     ;;
 stop)
     PID=$(_get_pid)
+    # Dọn sạch mọi Python orphan trước (phòng trường hợp PID file sai)
+    pkill -f "pf_notify.py watch" 2>/dev/null || true
     if [ -z "$PID" ]; then
         echo "pf_notify not running"
         rm -f "$PIDFILE"

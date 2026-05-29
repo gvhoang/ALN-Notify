@@ -195,8 +195,8 @@ def send_telegram(token, chat_id, text, retry=3, backoff=2, rate_limit=10, threa
         "parse_mode":               "HTML",
         "disable_web_page_preview": "true",
     }
-    if thread_id:
-        params["message_thread_id"] = str(thread_id)
+    if thread_id is not None:
+        params["message_thread_id"] = int(thread_id)
 
     payload = urllib.parse.urlencode(params).encode("utf-8")
 
@@ -246,15 +246,29 @@ def get_or_create_topic(cfg, state):
     Trả về int thread_id hoặc None nếu use_topics=False hoặc lỗi."""
     if not cfg.get("use_topics"):
         return None
-    cached = state.get("_topic_id")
-    if cached:
-        return cached
     name = cfg.get("topic_name") or get_pfsense_fqdn().split(".")[0]  # short hostname
+
+    topic_meta = state.get("_topic", {})
+    if (topic_meta.get("chat_id") == cfg["telegram_chat_id"] and
+            topic_meta.get("name") == name and
+            topic_meta.get("message_thread_id")):
+        return int(topic_meta["message_thread_id"])
+
+    # Backward compatibility for older state files.
+    cached = state.get("_topic_id")
+    if cached and not topic_meta:
+        return int(cached)
+
     tid  = create_telegram_topic(cfg["telegram_token"], cfg["telegram_chat_id"], name)
     if tid:
-        state["_topic_id"] = tid
+        state["_topic"] = {
+            "chat_id": cfg["telegram_chat_id"],
+            "name": name,
+            "message_thread_id": int(tid),
+        }
+        state["_topic_id"] = int(tid)
         save_state(cfg["state_file"], state)
-    return tid
+    return int(tid) if tid else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -718,7 +732,8 @@ def watch_log(cfg):
         _log("🖥️  Máy chủ: %s" % local_fqdn)
         _log("📡 Telegram chat: %s" % c["telegram_chat_id"])
         if c.get("use_topics"):
-            tid = state.get("_topic_id")
+            topic_meta = state.get("_topic", {})
+            tid = topic_meta.get("message_thread_id") or state.get("_topic_id")
             _log("🗂️  Forum Topics: bật | topic_id=%s" % (tid if tid else "chưa tạo — sẽ tạo khi khởi động"))
         _log("⏳ Trì hoãn cảnh báo: %ds | 🔕 Chặn spam: %ds | 🔁 Retry: %d" % (
             c["delay_seconds"], c["spam_cooldown"], c["retry_count"]))
@@ -934,6 +949,8 @@ def main():
     tp.add_argument("--chat-id", default=None, dest="chat_id")
     tp.add_argument("--gateway", default="VIETTEL_TAYNINH")
     tp.add_argument("--status",  default="offline", choices=["online", "offline"])
+    tp.add_argument("--single",  action="store_true",
+                    help="Chỉ gửi 1 tin test, không gửi lại các sự kiện log gần nhất")
 
     args = p.parse_args()
 
@@ -948,6 +965,7 @@ def main():
 
     elif args.mode == "send":
         state = load_state(cfg["state_file"])
+        topic_id = get_or_create_topic(cfg, state)
         if not args.no_delay and cfg["delay_seconds"] > 0:
             _log("⏳ Đợi %ds…" % cfg["delay_seconds"])
             time.sleep(cfg["delay_seconds"])
@@ -956,7 +974,7 @@ def main():
                  "rtt_avg": args.rtt, "loss_pct": args.loss,
                  "substatus": args.substatus, "group": args.group,
                  "action": "removing from" if args.status == "offline" else "adding to"}
-        process_event(event, state, cfg)
+        process_event(event, state, cfg, thread_id=topic_id)
 
     elif args.mode == "test":
         hostname = get_pfsense_fqdn()
@@ -965,7 +983,30 @@ def main():
 
         if not token or "YOUR_BOT_TOKEN" in token:
             print("⚠️  Chưa cài đặt telegram_token trong config!")
-            return
+            sys.exit(1)
+
+        if not chat_id:
+            print("⚠️  Chưa cài đặt telegram_chat_id trong config!")
+            sys.exit(1)
+
+        state = load_state(cfg["state_file"])
+        topic_id = get_or_create_topic(cfg, state)
+
+        if args.single:
+            msg = (
+                "✅ <b>PF Notify test OK</b>\n\n"
+                "🖥️ Máy chủ: <code>%s</code>\n"
+                "⏰ %s"
+            ) % (hostname, datetime.now().strftime("%d/%m/%Y %H:%M:%S"))
+            ok = send_telegram(
+                token, chat_id, msg,
+                retry=cfg["retry_count"],
+                backoff=cfg["retry_backoff"],
+                rate_limit=cfg["rate_limit_per_min"],
+                thread_id=topic_id,
+            )
+            print("✅ Test gửi thành công" if ok else "❌ Gửi thất bại")
+            sys.exit(0 if ok else 1)
 
         real_events = _collect_recent_events(cfg)
         if real_events:
@@ -980,20 +1021,33 @@ def main():
                     continue
                 print(re.sub(r"<[^>]+>", "", msg).strip())
                 print("-" * 40)
-                ok = send_telegram(token, chat_id, msg)
+                ok = send_telegram(
+                    token, chat_id, msg,
+                    retry=cfg["retry_count"],
+                    backoff=cfg["retry_backoff"],
+                    rate_limit=cfg["rate_limit_per_min"],
+                    thread_id=topic_id,
+                )
                 if ok:
                     sent += 1
                 time.sleep(1)
             print("✅ Đã gửi %d tin nhắn" % sent if sent else "❌ Gửi thất bại")
-            return
+            sys.exit(0 if sent else 1)
 
         _log("⚠️  Không đọc được log — gửi demo")
         msg = format_message(gateway="VIETTEL_TAYNINH", status="offline",
                              monitor_ip="10.123.234.2", gateway_ip="10.123.234.1",
                              rtt_avg="", loss_pct=100.0, substatus="loss",
                              group="FPT_st1", action="removing from", pfsense=hostname)
-        ok = send_telegram(token, chat_id, msg)
+        ok = send_telegram(
+            token, chat_id, msg,
+            retry=cfg["retry_count"],
+            backoff=cfg["retry_backoff"],
+            rate_limit=cfg["rate_limit_per_min"],
+            thread_id=topic_id,
+        )
         print("✅ Demo gửi thành công" if ok else "❌ Gửi thất bại")
+        sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":

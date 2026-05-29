@@ -18,7 +18,7 @@ ssh admin@192.168.0.1 "mkdir -p /tmp/pf_notify_pkg"
 scp -r package/* admin@192.168.0.1:/tmp/pf_notify_pkg/
 ```
 
-Hoặc dùng **WinSCP**: kéo thả toàn bộ thư mục `package/` vào `/tmp/pf_notify_pkg/` trên pfSense.
+Hoặc dùng **Bitvise xterm SFTP**: kéo thả toàn bộ thư mục `package/` vào `/tmp/pf_notify_pkg/` trên pfSense.
 
 ### Bước 2 — Chạy installer
 
@@ -125,7 +125,7 @@ Không cần cài thêm thư viện — script chỉ dùng thư viện chuẩn P
 
 ## Bước 2 — Upload file lên pfSense
 
-**Dùng WinSCP hoặc SCP từ Windows:**
+**Dùng Bitvise SFTP hoặc SCP từ Windows:**
 ```
 upload_to__usr_local_sbin\pf_notify.py        → /usr/local/sbin/pf_notify.py
 upload_to__usr_local_etc_rc.d\pf_notify.sh    → /usr/local/etc/rc.d/pf_notify.sh

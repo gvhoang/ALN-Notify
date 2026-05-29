@@ -25,6 +25,6 @@
 
   "rate_limit_per_min": 10,
 
-  "batch_enabled": true,
-  "batch_window":  5
+  "use_topics": false,
+  "topic_name": ""
 }
