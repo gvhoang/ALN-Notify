@@ -708,12 +708,18 @@ def watch_log(cfg):
 
     # Khởi tạo topic nếu use_topics (tạo topic tên hostname lần đầu chạy)
     topic_id = get_or_create_topic(cfg, state)
+    if cfg.get("use_topics"):
+        if topic_id:
+            _log("✅ [TOPIC] Sẽ gửi vào thread_id=%s" % topic_id)
+        else:
+            _log("⚠️  [TOPIC] Không lấy được thread_id — kiểm tra quyền bot (Manage Topics) và Chat ID group")
 
     def _print_startup(c):
         _log("🖥️  Máy chủ: %s" % local_fqdn)
         _log("📡 Telegram chat: %s" % c["telegram_chat_id"])
         if c.get("use_topics"):
-            _log("🗂️  Forum Topics: bật | topic_id=%s" % (state.get("_topic_id") or "chưa tạo"))
+            tid = state.get("_topic_id")
+            _log("🗂️  Forum Topics: bật | topic_id=%s" % (tid if tid else "chưa tạo — sẽ tạo khi khởi động"))
         _log("⏳ Trì hoãn cảnh báo: %ds | 🔕 Chặn spam: %ds | 🔁 Retry: %d" % (
             c["delay_seconds"], c["spam_cooldown"], c["retry_count"]))
         _log("📊 Rate limit: %d tin/phút" % c["rate_limit_per_min"])
