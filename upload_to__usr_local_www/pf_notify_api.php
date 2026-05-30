@@ -44,6 +44,7 @@ function pf_load_config() {
         'rate_limit_per_min'        => 10,
         'use_topics'                => false,
         'topic_name'                => '',
+        'topic_thread_id'           => 0,
     ];
     if (file_exists(PF_CONFIG_FILE)) {
         $json = @json_decode(file_get_contents(PF_CONFIG_FILE), true);
@@ -67,7 +68,7 @@ function pf_run_rc($cmd) {
 // guiconfig.inc đã enforce authentication (redirect nếu chưa đăng nhập).
 // Với write actions, thêm csrf_check() để ngăn CSRF attack.
 $action = $_REQUEST['action'] ?? '';
-$write_actions = ['start', 'stop', 'restart', 'reload', 'save', 'test'];
+$write_actions = ['start', 'stop', 'restart', 'reload', 'save', 'test', 'reset_topic'];
 if (in_array($action, $write_actions, true)) {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
         echo json_encode(['ok' => false, 'error' => 'POST required']);
@@ -152,6 +153,7 @@ switch ($action) {
             'rate_limit_per_min'      => $clamp($data['rate_limit_per_min']  ?? $existing['rate_limit_per_min'], 0, 120),
             'use_topics'              => (bool)($data['use_topics'] ?? $existing['use_topics']),
             'topic_name'              => trim($data['topic_name'] ?? $existing['topic_name']),
+            'topic_thread_id'         => max(0, (int)($data['topic_thread_id'] ?? $existing['topic_thread_id'])),
         ];
         @mkdir(dirname(PF_CONFIG_FILE), 0750, true);
         $written = file_put_contents(PF_CONFIG_FILE, json_encode($cfg, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
@@ -185,6 +187,22 @@ switch ($action) {
             echo json_encode(['ok' => true, 'output' => 'Tin test đã gửi thành công tới Telegram']);
         } else {
             echo json_encode(['ok' => false, 'error' => 'Gửi thất bại — kiểm tra Token và Chat ID']);
+        }
+        break;
+
+    case 'reset_topic':
+        $state_file = '/var/db/pf_notify/state.json';
+        $state = [];
+        if (file_exists($state_file)) {
+            $raw = @json_decode(file_get_contents($state_file), true);
+            if (is_array($raw)) $state = $raw;
+        }
+        unset($state['_topic'], $state['_topic_id']);
+        $written = file_put_contents($state_file, json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+        if ($written === false) {
+            echo json_encode(['ok' => false, 'error' => 'Không thể ghi state file']);
+        } else {
+            echo json_encode(['ok' => true, 'message' => 'Đã xoá cache topic — lần khởi động tiếp theo sẽ tạo topic mới']);
         }
         break;
 

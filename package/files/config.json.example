@@ -26,5 +26,6 @@
   "rate_limit_per_min": 10,
 
   "use_topics": false,
-  "topic_name": ""
+  "topic_name": "",
+  "topic_thread_id": 0
 }

@@ -4,7 +4,7 @@
  * Upload: /usr/local/www/pf_notify.php
  */
 require_once('guiconfig.inc');
-$pgtitle = [gettext('Diagnostics'), 'PF Notify'];
+$pgtitle = [gettext('Services'), 'ALN Notify'];
 include('head.inc');
 
 define('PF_CONFIG_FILE', '/usr/local/etc/pf_notify/config.json');
@@ -19,6 +19,9 @@ $defaults = [
     'retry_count'           => 3,
     'retry_backoff'         => 2,
     'rate_limit_per_min'    => 10,
+    'use_topics'            => false,
+    'topic_name'            => '',
+    'topic_thread_id'       => 0,
 ];
 
 $pf_cfg = $defaults;
@@ -241,8 +244,8 @@ $log_count     = count((array)$pf_cfg['log_files']);
     <div class="title-row">
       <div class="app-mark"><svg><use href="#pfn-bell"></use></svg></div>
       <div>
-        <h1>PF Notify</h1>
-        <div class="subtitle">Telegram Gateway Notifier cho pfSense</div>
+        <h1>ALN Notify</h1>
+        <div class="subtitle">Telegram Gateway Notifier</div>
       </div>
     </div>
     <div class="status-group">
@@ -313,6 +316,37 @@ $log_count     = count((array)$pf_cfg['log_files']);
                        placeholder="homehoag">
                 <p class="hint">Chat ID phải là <code>-100xxxxxxx</code> (Supergroup)</p>
               </div>
+              <div class="field">
+                <label for="topic_thread_id">Thread ID thủ công <span style="font-weight:400;">(0 = tự tạo/tự tìm)</span></label>
+                <input class="input" id="topic_thread_id" type="number" min="0"
+                       value="<?= (int)$pf_cfg['topic_thread_id'] ?>"
+                       placeholder="0">
+                <p class="hint">Nhập message_thread_id của topic nếu đã tạo thủ công — bỏ qua cơ chế auto-create</p>
+              </div>
+<?php
+$state_file = '/var/db/pf_notify/state.json';
+$cached_tid = 0;
+if (file_exists($state_file)) {
+    $st = @json_decode(file_get_contents($state_file), true);
+    if (is_array($st)) {
+        if (isset($st['_topic']['message_thread_id'])) $cached_tid = (int)$st['_topic']['message_thread_id'];
+        elseif (isset($st['_topic_id']))               $cached_tid = (int)$st['_topic_id'];
+    }
+}
+?>
+              <?php if ($cached_tid > 0): ?>
+              <div class="field">
+                <p class="hint">📌 Thread ID hiện tại (cache): <code><?= $cached_tid ?></code>
+                  &nbsp;<button type="button" class="btn btn-xs btn-danger" id="btn-reset-topic">🗑️ Xoá cache Topic</button>
+                </p>
+              </div>
+              <?php else: ?>
+              <div class="field">
+                <p class="hint">📌 Chưa có cache topic.
+                  &nbsp;<button type="button" class="btn btn-xs btn-danger" id="btn-reset-topic">🗑️ Xoá cache Topic</button>
+                </p>
+              </div>
+              <?php endif; ?>
             </div>
           </div>
         </div>
@@ -436,9 +470,6 @@ $log_count     = count((array)$pf_cfg['log_files']);
             <button class="btn btn-secondary" id="btn-restart">
               <svg><use href="#pfn-refresh"></use></svg> Restart
             </button>
-            <button class="btn btn-secondary" id="btn-reload">
-              <svg><use href="#pfn-refresh"></use></svg> Reload
-            </button>
           </div>
         </div>
       </section>
@@ -556,7 +587,6 @@ $log_count     = count((array)$pf_cfg['log_files']);
     $('#btn-start').click(function ()   { svcAction('start'); });
     $('#btn-stop').click(function ()    { svcAction('stop'); });
     $('#btn-restart').click(function () { svcAction('restart'); });
-    $('#btn-reload').click(function ()  { svcAction('reload'); });
 
     // ── Token toggle ──────────────────────────────────────────────────────
     $('#pfn-token-toggle').click(function () {
@@ -569,6 +599,19 @@ $log_count     = count((array)$pf_cfg['log_files']);
         var on = $(this).attr('aria-checked') !== 'true';
         $(this).attr('aria-checked', String(on));
         if (on) $('#pfn-topics-extra').show(); else $('#pfn-topics-extra').hide();
+    });
+
+    // ── Reset topic cache ─────────────────────────────────────────────────
+    $('#btn-reset-topic').click(function () {
+        if (!confirm('Xoá cache topic? Lần khởi động tiếp theo sẽ tự tạo topic mới nếu cần.')) return;
+        apiPost('reset_topic', {}, function (r) {
+            if (r.ok) {
+                alert('✅ Đã xoá cache topic.\n' + (r.message || ''));
+                location.reload();
+            } else {
+                alert('❌ ' + (r.error || 'Xoá thất bại'));
+            }
+        });
     });
 
     // ── Test ──────────────────────────────────────────────────────────────
@@ -605,7 +648,8 @@ $log_count     = count((array)$pf_cfg['log_files']);
             retry_backoff:      parseInt($('#retry_backoff').val(), 10),
             rate_limit_per_min: parseInt($('#rate_limit_per_min').val(), 10),
             use_topics:         $('#pfn-topics-switch').attr('aria-checked') === 'true',
-            topic_name:         $.trim($('#topic_name').val())
+            topic_name:         $.trim($('#topic_name').val()),
+            topic_thread_id:    parseInt($('#topic_thread_id').val(), 10) || 0
         };
         $r.attr('hidden', true);
         $.ajax({

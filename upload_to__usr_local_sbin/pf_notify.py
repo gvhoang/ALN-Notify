@@ -26,6 +26,7 @@ import queue
 import urllib.request
 import urllib.parse
 import urllib.error
+from collections import deque
 from datetime import datetime
 
 
@@ -54,6 +55,7 @@ DEFAULT_CFG = {
     "rate_limit_per_min":        10,
     "use_topics":                False,
     "topic_name":                "",
+    "topic_thread_id":           0,
 }
 
 
@@ -223,6 +225,37 @@ def send_telegram(token, chat_id, text, retry=3, backoff=2, rate_limit=10, threa
     return False
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Async sender — bounded queue + dedicated thread (tránh chặn vòng theo dõi)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_OUTBOX_MAX = 100  # số tin tối đa trong hàng chờ; vượt ngưỡng → bỏ tin
+
+
+def _sender_worker(q):
+    """Luồng gửi Telegram — xử lý hàng chờ độc lập, không chặn vòng theo dõi chính."""
+    while True:
+        try:
+            job = q.get()
+            if job is None:   # poison pill — dừng thread
+                break
+            token, chat_id, text, retry, backoff, rate_limit, thread_id, label = job
+            ok = send_telegram(token, chat_id, text,
+                               retry=retry, backoff=backoff,
+                               rate_limit=rate_limit, thread_id=thread_id)
+            _log("[SEND] %s %s" % ("✅" if ok else "❌", label))
+        except Exception as e:
+            _err("[SEND] Worker lỗi ngoài ý muốn: %s" % e)
+
+
+def _enqueue(outbox, token, chat_id, text, retry, backoff, rate_limit, thread_id, label):
+    """Đưa tin vào hàng chờ gửi. Bỏ qua (log cảnh báo) nếu hàng chờ đã đầy."""
+    try:
+        outbox.put_nowait((token, chat_id, text, retry, backoff, rate_limit, thread_id, label))
+    except queue.Full:
+        _err("⚠️  Hàng chờ Telegram đầy (>%d) — bỏ tin: %s" % (_OUTBOX_MAX, label))
+
+
 def create_telegram_topic(token, chat_id, name):
     """Tạo Forum Topic mới trong Supergroup. Trả về message_thread_id hoặc None."""
     url     = "https://api.telegram.org/bot%s/createForumTopic" % token
@@ -246,6 +279,12 @@ def get_or_create_topic(cfg, state):
     Trả về int thread_id hoặc None nếu use_topics=False hoặc lỗi."""
     if not cfg.get("use_topics"):
         return None
+
+    # Ưu tiên topic_thread_id cấu hình thủ công — không cần tạo hay tra cứu
+    manual_tid = cfg.get("topic_thread_id")
+    if manual_tid and int(manual_tid) > 0:
+        return int(manual_tid)
+
     name = cfg.get("topic_name") or get_pfsense_fqdn().split(".")[0]  # short hostname
 
     topic_meta = state.get("_topic", {})
@@ -593,7 +632,7 @@ class PendingBuffer:
 # Core processing
 # ─────────────────────────────────────────────────────────────────────────────
 
-def process_event(event, state, cfg, thread_id=None):
+def process_event(event, state, cfg, thread_id=None, outbox=None):
     gw     = event.get("gateway", "")
     status = event.get("status", "")
     if not gw or not status:
@@ -627,28 +666,32 @@ def process_event(event, state, cfg, thread_id=None):
         high_loss_threshold = cfg["high_loss_threshold"],
     )
 
-    ok = send_telegram(
-        cfg["telegram_token"], cfg["telegram_chat_id"], msg,
-        retry=cfg["retry_count"], backoff=cfg["retry_backoff"],
-        rate_limit=cfg["rate_limit_per_min"],
-        thread_id=thread_id,
-    )
-    if ok:
-        state.setdefault(gw, {})
-        # Lưu effective_status (không phải status gốc) để cooldown/should_send
-        # phản ánh đúng trạng thái đã gửi — tránh suppress event online thật sau này.
-        state[gw]["status"]    = effective_status
-        state[gw]["last_sent"] = time.time()
-        save_state(cfg["state_file"], state)
-        _log("[%s] ✅ đã gửi %s (mất gói=%.0f%%)" % (gw, effective_status, loss))
+    # Cập nhật state ngay (optimistic) — chặn spam kể cả khi Telegram chậm
+    state.setdefault(gw, {})
+    # Lưu effective_status (không phải status gốc) để cooldown/should_send
+    # phản ánh đúng trạng thái đã gửi — tránh suppress event online thật sau này.
+    state[gw]["status"]    = effective_status
+    state[gw]["last_sent"] = time.time()
+    save_state(cfg["state_file"], state)
+
+    label = "%s → %s (mất gói=%.0f%%)" % (gw, effective_status, loss)
+    if outbox is not None:
+        _enqueue(outbox, cfg["telegram_token"], cfg["telegram_chat_id"], msg,
+                 cfg["retry_count"], cfg["retry_backoff"],
+                 cfg["rate_limit_per_min"], thread_id, label)
     else:
-        _log("[%s] ❌ gửi thất bại" % gw)
+        ok = send_telegram(
+            cfg["telegram_token"], cfg["telegram_chat_id"], msg,
+            retry=cfg["retry_count"], backoff=cfg["retry_backoff"],
+            rate_limit=cfg["rate_limit_per_min"], thread_id=thread_id,
+        )
+        _log("[%s] %s đã gửi %s (mất gói=%.0f%%)" % (gw, "✅" if ok else "❌", effective_status, loss))
 
 
-def process_events(events, state, cfg, thread_id=None):
+def process_events(events, state, cfg, thread_id=None, outbox=None):
     """Gửi từng GW event riêng biệt (không gộp batch)."""
     for ev in events:
-        process_event(ev, state, cfg, thread_id=thread_id)
+        process_event(ev, state, cfg, thread_id=thread_id, outbox=outbox)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -748,6 +791,11 @@ def watch_log(cfg):
         t = threading.Thread(target=_tail_worker, args=(lf, ev_queue), daemon=True)
         t.start()
 
+    # ── Luồng gửi Telegram tách biệt — không chặn vòng theo dõi chính ──
+    outbox = queue.Queue(maxsize=_OUTBOX_MAX)
+    sender = threading.Thread(target=_sender_worker, args=(outbox,), daemon=True)
+    sender.start()
+
     try:
         while True:
             # Kiểm tra SIGHUP — reload config
@@ -775,20 +823,19 @@ def watch_log(cfg):
 
                 elif etype == "dyndns":
                     msg = format_dyndns_message(event["hostname"], event["new_ip"], pfsense=ps)
-                    ok  = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg,
-                                        retry=cfg["retry_count"], backoff=cfg["retry_backoff"],
-                                        rate_limit=cfg["rate_limit_per_min"], thread_id=topic_id)
-                    _log("[DynDNS] %s %s → %s" % ("✅" if ok else "❌",
-                                                    event["hostname"], event["new_ip"]))
+                    _enqueue(outbox, cfg["telegram_token"], cfg["telegram_chat_id"], msg,
+                             cfg["retry_count"], cfg["retry_backoff"],
+                             cfg["rate_limit_per_min"], topic_id,
+                             "DynDNS %s → %s" % (event["hostname"], event["new_ip"]))
 
                 elif etype == "system":
                     msg = format_system_message(event["event"], ps)
                     if msg:
-                        ok    = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg,
-                                              retry=cfg["retry_count"], backoff=cfg["retry_backoff"],
-                                              rate_limit=cfg["rate_limit_per_min"], thread_id=topic_id)
                         label = "🟢 Khởi động" if event["event"] == "bootup" else "🔴 Tắt máy"
-                        _log("[HỆ THỐNG] %s %s" % (label, "✅" if ok else "❌"))
+                        _enqueue(outbox, cfg["telegram_token"], cfg["telegram_chat_id"], msg,
+                                 cfg["retry_count"], cfg["retry_backoff"],
+                                 cfg["rate_limit_per_min"], topic_id,
+                                 "HỆ THỐNG %s" % label)
 
                 elif etype == "ppp":
                     ev = event["event"]
@@ -799,10 +846,10 @@ def watch_log(cfg):
                                              remote_ip=event.get("remote_ip", ""),
                                              reason=event.get("reason", ""), pfsense=ps)
                     if msg:
-                        ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg,
-                                           retry=cfg["retry_count"], backoff=cfg["retry_backoff"],
-                                           rate_limit=cfg["rate_limit_per_min"], thread_id=topic_id)
-                        _log("[PPP] %s gửi %s" % ("✅" if ok else "❌", ev))
+                        _enqueue(outbox, cfg["telegram_token"], cfg["telegram_chat_id"], msg,
+                                 cfg["retry_count"], cfg["retry_backoff"],
+                                 cfg["rate_limit_per_min"], topic_id,
+                                 "PPP %s" % ev)
 
                 elif etype == "auth":
                     ev     = event["event"]
@@ -823,28 +870,25 @@ def watch_log(cfg):
                             msg = format_auth_message(event=ev, user=user, src_ip=src_ip,
                                                       count=count, pfsense=ps)
                             if msg:
-                                ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"],
-                                                   msg, retry=cfg["retry_count"],
-                                                   backoff=cfg["retry_backoff"],
-                                                   rate_limit=cfg["rate_limit_per_min"],
-                                                   thread_id=topic_id)
-                                _log("[AUTH] %s GUI fail x%d user=%s" % (
-                                    "✅" if ok else "❌", count, user))
+                                _enqueue(outbox, cfg["telegram_token"], cfg["telegram_chat_id"],
+                                         msg, cfg["retry_count"], cfg["retry_backoff"],
+                                         cfg["rate_limit_per_min"], topic_id,
+                                         "AUTH GUI fail x%d user=%s" % (count, user))
                         else:
                             _log("[AUTH] GUI fail x%d (chưa đủ %d) user=%s" % (
                                 count, threshold, user))
                     else:
                         msg = format_auth_message(event=ev, user=user, src_ip=src_ip, pfsense=ps)
                         if msg:
-                            ok = send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg,
-                                               retry=cfg["retry_count"], backoff=cfg["retry_backoff"],
-                                               rate_limit=cfg["rate_limit_per_min"], thread_id=topic_id)
-                            _log("[AUTH] %s %s" % ("✅" if ok else "❌", ev))
+                            _enqueue(outbox, cfg["telegram_token"], cfg["telegram_chat_id"], msg,
+                                     cfg["retry_count"], cfg["retry_backoff"],
+                                     cfg["rate_limit_per_min"], topic_id,
+                                     "AUTH %s" % ev)
 
             # Flush gateway events (tách biệt từng gateway)
             ready = buf.flush_ready()
             if ready:
-                process_events(ready, state, cfg, thread_id=topic_id)
+                process_events(ready, state, cfg, thread_id=topic_id, outbox=outbox)
 
             time.sleep(0.4)
 
@@ -862,8 +906,8 @@ def _collect_recent_events(cfg, max_lines=300, max_events=5):
     for lf in log_files:
         try:
             with open(lf, "r", encoding="utf-8", errors="replace") as fh:
-                lines = fh.readlines()
-            for line in lines[-max_lines:]:
+                tail = deque(fh, maxlen=max_lines)
+            for line in tail:
                 line = line.rstrip("\n\r")
                 if not any(k in line for k in _WATCH_KEYS):
                     continue
